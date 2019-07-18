@@ -6,19 +6,21 @@
 #include <algorithm>
 
 // Erik
+constexpr int STRENGTH = 2980;
+
 constexpr int SKILL_SP[2] = {2868, 5883};
 constexpr int SKILL_STARTUP = 6;
-constexpr int SKILL_FRAMES[2] = {111, 114};
-constexpr int SKILL_DMG[2] = {1036, 933};
+constexpr int SKILL_RECOVERY[2] = {111, 114};
+constexpr int SKILL_MOD[2] = {1036, 933};
 
 // Axe
 constexpr int COMBO_SP[5] = {200, 240, 360, 380, 420};
 constexpr int COMBO_STARTUP = 16;
 constexpr int COMBO_RECOVERY[5] = {46, 61, 40, 78, 19};
-constexpr int COMBO_DMG[5] = {114, 122, 204, 216, 228};
+constexpr int COMBO_MOD[5] = {114, 122, 204, 216, 228};
 
 constexpr int FS_SP = 300;
-constexpr int FS_DMG = 192;
+constexpr int FS_MOD = 192;
 constexpr int FS_STARTUP = 40 + 78;
 constexpr int FS_RECOVERY = 34;
 
@@ -47,8 +49,28 @@ enum ComboState : int8_t {
   AFTER_C3 = 2,
   AFTER_C4 = 3,
   AFTER_C5 = 4,
+  AFTER_S1 = 79,
+  AFTER_S2 = 89,
   AFTER_FS = 99,
 };
+
+int handle_recovery(ComboState c, bool combo_recovery) {
+  switch (c) {
+    case AFTER_FS:
+      return FS_RECOVERY;
+    case AFTER_S1:
+      return SKILL_RECOVERY[0];
+    case AFTER_S2:
+      return SKILL_RECOVERY[1];
+    case NO_COMBO:
+      return 0;
+    default:
+      if (combo_recovery) {
+        return COMBO_RECOVERY[c];
+      }
+      return 0;
+  }
+}
 
 ComboState next_combo_state(ComboState combo) {
   return ComboState((combo + 1) % 5);
@@ -65,6 +87,11 @@ union AdvState {
 };
 static_assert(sizeof(AdvState) == sizeof(AdvStateCode), "AdvState packs");
 
+std::ostream& operator<<(std::ostream& os, AdvState st) {
+  os << "[sp=" << st.s.sp_[0] << "," << st.s.sp_[1] << ";c=" << st.s.combo_ << "]";
+  return os;
+}
+
 constexpr AdvState INIT_ST = { .s = { .sp_ = {0, 0}, .combo_ = NO_COMBO } };
 
 // 'f' = force strike
@@ -80,6 +107,7 @@ using ComesFrom = std::unordered_map<AdvStateCode, std::vector<std::pair<AdvStat
 ComesFrom compute_states() {
   ComesFrom comes_from;
   std::vector<AdvState> todo{INIT_ST};
+  comes_from[INIT_ST.c];
   while (todo.size()) {
     AdvState s = todo.back();
     todo.pop_back();
@@ -94,7 +122,7 @@ ComesFrom compute_states() {
       if (s.s.sp_[i] >= SKILL_SP[i]) {
         AdvState t = s;
         t.s.sp_[i] = 0;
-        t.s.combo_ = NO_COMBO;
+        t.s.combo_ = i == 0 ? AFTER_S1 : AFTER_S2;
         push(t, '1' + i);
         skill_count++;
       }
@@ -125,7 +153,13 @@ ComesFrom compute_states() {
 
 using AdvStateId = int;
 
-int main() {
+int main(int argc, char** argv) {
+
+  int frames;
+  std::cerr << "frames? ";
+  std::cin >> frames;
+  std::cerr << frames << "\n";
+
   auto states = compute_states();
 
   // We want to make a table of the states, so assign them a contiguous
@@ -141,22 +175,16 @@ int main() {
 
   std::cerr << "num_states = " << num_states << "\n";
 
-  int frames = 3600; // 60s
-  //frames = 600; // 1s
-  std::vector<int> best_dps(frames * num_states, -99999999);
+  std::vector<double> best_dps(frames * num_states, -1);
   std::vector<std::string> best_sequence(frames * num_states);
 
   auto dix = [&](int frame, int state_ix) {
     return frame * num_states + state_ix;
   };
 
-  // Initialize frame 0
-  //for (int s = 0; s < num_states; s++) {
-  //  best_dps[dix(0, s)] = -99999999;
-  //}
-  best_dps[dix(0, state2ix[INIT_ST.c])] = 0;
+  best_dps[dix(0, state2ix.at(INIT_ST.c))] = 0;
 
-  int last_best = 0;
+  double last_best = 0;
   for (int f = 1; f < frames; f++) {
     for (int s = 0; s < num_states; s++) {
       AdvState st;
@@ -171,45 +199,69 @@ int main() {
         std::tie(p_st, ac) = pair;
 
         int frames = 0;
-        int dmg = 0;
+
+        int mod = 0;
         if (ac == 'x') {
-          if (p_st.s.combo_ == NO_COMBO) {
+          frames += handle_recovery(p_st.s.combo_, /*combo_recovery*/ true);
+          if (st.s.combo_ == AFTER_C1) {
             frames += COMBO_STARTUP;
-          } else if (p_st.s.combo_ == AFTER_FS) {
-            frames += FS_RECOVERY + COMBO_STARTUP;
-          } else {
-            frames += COMBO_RECOVERY[p_st.s.combo_];
-            if (p_st.s.combo_ == AFTER_C5) {
-              frames += COMBO_STARTUP;
-            }
           }
-          dmg = COMBO_DMG[st.s.combo_];
+          mod = COMBO_MOD[st.s.combo_];
         } else if (ac == 'f') {
-          if (p_st.s.combo_ == NO_COMBO) {
-            frames += FS_STARTUP;
-          } else if (p_st.s.combo_ == AFTER_FS) {
-            frames += FS_STARTUP + FS_RECOVERY;
-          } else {
-            frames += XFS_STARTUP[p_st.s.combo_];
+          // Force strike cancels combo recovery; instead,
+          // there's specific startup costs in this case
+          frames += handle_recovery(p_st.s.combo_, /*combo recovery*/ false);
+          switch (p_st.s.combo_) {
+            case NO_COMBO:
+            case AFTER_S1:
+            case AFTER_S2:
+            case AFTER_FS:
+              frames += FS_STARTUP;
+              break;
+            default:
+              frames += XFS_STARTUP[p_st.s.combo_];
+              break;
           }
-          dmg = FS_DMG;
+          mod = FS_MOD;
         } else {
+          // Skill cancels all recovery
           frames += SKILL_STARTUP;
-          frames += SKILL_FRAMES[ac - '1'];
-          dmg = SKILL_DMG[ac - '1'];
+          mod = SKILL_MOD[ac == '1' ? 0 : 1];
         }
 
         if (f >= frames) {
-          auto z = dix(f - frames, state2ix[p_st.c]);
-          auto tmp = best_dps[z] + dmg;
-          if (tmp > cur) {
-            cur = tmp;
-            cur_seq = best_sequence[z] + ac;
+          auto z = dix(f - frames, state2ix.at(p_st.c));
+          if (best_dps[z] >= 0) {
+
+            double dmg = 5./3;
+            dmg *= STRENGTH;
+            // dmg *= ability;
+            // dmg *= buffs;
+            // dmg *= coab;
+            dmg *= ((double)mod)/100;
+            if (ac == '1' || ac == '2') {
+              dmg *= 1.4; // skill_ab, from KFM + FitF
+              // dmg *= skill_buffs;
+              // dmg *= skill_coab;
+            } else if (ac == 'f') {
+              dmg *= 1.3; // Erik's ability
+            }
+            // dmg *= punisher;
+            // dmg *= elemental;
+            dmg /= 10. * 1.;  // defense * defense change
+            dmg *= (1. + (0.04 + 0.14 /*KFM*/) * (0.7 + 0.15 /* FitF */)); // crit rate * crit damage
+
+            auto tmp = best_dps[z] + dmg;
+            if (tmp >= 0 && tmp > cur) {
+              //std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
+              cur = tmp;
+              cur_seq = best_sequence[z] + ac;
+            }
           }
         }
       }
     }
-    int best = -1;
+    double best = -1;
     std::string best_seq = "";
     for (int s = 0; s < num_states; s++) {
       auto tmp = best_dps[dix(f, s)];
@@ -218,71 +270,11 @@ int main() {
         best_seq = best_sequence[dix(f, s)];
       }
     }
-    if (best >= 0 && best > last_best) {
-      // Validate sequence
-      AdvState st = INIT_ST;
-      int dmg = 0;
-      int frames = 0;
-      for (auto c : best_seq) {
-        switch (c) {
-          case 'x':
-            switch (st.s.combo_) {
-              case NO_COMBO:
-                frames += COMBO_STARTUP;
-                break;
-              case AFTER_FS:
-                frames += FS_RECOVERY + COMBO_STARTUP;
-                break;
-              default:
-                frames += COMBO_RECOVERY[st.s.combo_];
-                if (st.s.combo_ == AFTER_C5) {
-                  frames += COMBO_STARTUP;
-                }
-                break;
-            }
-            dmg += COMBO_DMG[next_combo_state(st.s.combo_)];
-            st.s.combo_ = next_combo_state(st.s.combo_);
-            break;
-          case '1':
-            frames += SKILL_STARTUP;
-            frames += SKILL_FRAMES[0];
-            dmg += SKILL_DMG[0];
-            st.s.combo_ = NO_COMBO;
-            break;
-          case '2':
-            frames += SKILL_STARTUP;
-            frames += SKILL_FRAMES[1];
-            dmg += SKILL_DMG[1];
-            st.s.combo_ = NO_COMBO;
-            break;
-          case 'f':
-            dmg += FS_DMG;
-            switch (st.s.combo_) {
-              case NO_COMBO:
-                frames += FS_STARTUP;
-                break;
-              case AFTER_FS:
-                frames += FS_STARTUP + FS_RECOVERY;
-                break;
-              default:
-                frames += XFS_STARTUP[st.s.combo_];
-                break;
-            }
-            st.s.combo_ = AFTER_FS;
-            break;
-          default:
-            std::cerr << "Invalid action: " << c << "\n";
-            return -1;
-        }
+    if (best >= 0) {
+      if (best >= 0 && best > last_best) {
+        std::cerr << best_seq << " for " << best << " dmg in " << f << " frames\n";
+        last_best = best;
       }
-      if (dmg != best || frames != f) {
-        std::cerr << "VALIDATION FAILED: validator says "
-            << dmg << " in " << frames << " but optimizer thought "
-            << best << " in " << f << "\n";
-        return -1;
-      }
-      std::cerr << best_seq << " for " << best << " dmg in " << f << " frames\n";
-      last_best = best;
     }
   }
 
