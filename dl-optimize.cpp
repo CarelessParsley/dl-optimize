@@ -6,7 +6,7 @@
 #include <algorithm>
 
 // Erik
-constexpr int STRENGTH = 2980;
+constexpr double STRENGTH = 2980.56;
 
 constexpr int SKILL_SP[2] = {2868, 5883};
 constexpr int SKILL_STARTUP = 6;
@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
 
             auto tmp = best_dps[z] + dmg;
             if (tmp >= 0 && tmp > cur) {
-              std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
+              // std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
               cur = tmp;
               cur_seq = best_sequence[z] + ac;
             }
