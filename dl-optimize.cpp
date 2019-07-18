@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
 
             auto tmp = best_dps[z] + dmg;
             if (tmp >= 0 && tmp > cur) {
-              //std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
+              std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
               cur = tmp;
               cur_seq = best_sequence[z] + ac;
             }
