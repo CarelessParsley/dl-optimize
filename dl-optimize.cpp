@@ -24,30 +24,48 @@ constexpr int FS_RECOVERY = 34;
 
 constexpr int XFS_STARTUP[5] = {68, 62, 65, 67, 40};
 
+// Not the combo counter, but your location in a standard C5 combo.  We
+// use this to figure out what startup/recovery frames are relevant.
+//
+// Combo values:
+// -1 0 1 2 3 4       99 (FS)
+//   x x x x x x
+//     \-------/
+//     \--------------/
+//
+// NB: -1 means you didn't come out of a combo; 4 means
+// you just finished a c5.  You cycle then to state 0.
+// State -1 happens when you skill.
+//
+// 99 means you did an FS.  Importantly, 99 % 5 == 4,
+// so this also wraps around to zero so we can conveniently
+// implement next_combo_state.
+enum ComboState : int8_t {
+  NO_COMBO = -1,
+  AFTER_C1 = 0,
+  AFTER_C2 = 1,
+  AFTER_C3 = 2,
+  AFTER_C4 = 3,
+  AFTER_C5 = 4,
+  AFTER_FS = 99,
+};
+
+ComboState next_combo_state(ComboState combo) {
+  return ComboState((combo + 1) % 5);
+}
+
 // This is UB but I don't care
+using AdvStateCode = uint64_t;
 union AdvState {
   struct {
     int16_t sp_[2];
-
-    // Combo values:
-    // -1 0 1 2 3 4       99 (FS)
-    //   x x x x x x
-    //     \-------/
-    //     \--------------/
-    //
-    // NB: -1 means you didn't come out of a combo; 4 means
-    // you just finished a c5.  You cycle then to state 0.
-    // State -1 happens when you skill.
-    //
-    // 99 means you did an FS.  Importantly, 99 % 5 == 4,
-    // so this also wraps around to zero
-    int8_t combo_;
+    ComboState combo_;
   } s;
-  uint64_t c;
+  AdvStateCode c;
 };
-static_assert(sizeof(AdvState) == sizeof(uint64_t), "AdvState packs");
+static_assert(sizeof(AdvState) == sizeof(AdvStateCode), "AdvState packs");
 
-constexpr AdvState INIT_ST = { .s = { .sp_ = {0, 0}, .combo_ = -1 } };
+constexpr AdvState INIT_ST = { .s = { .sp_ = {0, 0}, .combo_ = NO_COMBO } };
 
 // -2 = force strike
 // -1 = basic combo
@@ -55,8 +73,12 @@ constexpr AdvState INIT_ST = { .s = { .sp_ = {0, 0}, .combo_ = -1 } };
 // 1 = s2
 using ActionCode = int;
 
-std::unordered_map<uint64_t, std::vector<std::pair<AdvState, ActionCode>>> compute_states() {
-  std::unordered_map<uint64_t, std::vector<std::pair<AdvState, ActionCode>>> comes_from;
+// Map from AdvState k to AdvStates which, when taking ActionCode, result
+// in k
+using ComesFrom = std::unordered_map<AdvStateCode, std::vector<std::pair<AdvState, ActionCode>>>;
+
+ComesFrom compute_states() {
+  ComesFrom comes_from;
   std::vector<AdvState> todo{INIT_ST};
   while (todo.size()) {
     AdvState s = todo.back();
@@ -72,7 +94,7 @@ std::unordered_map<uint64_t, std::vector<std::pair<AdvState, ActionCode>>> compu
       if (s.s.sp_[i] >= SKILL_SP[i]) {
         AdvState t = s;
         t.s.sp_[i] = 0;
-        t.s.combo_ = -1;
+        t.s.combo_ = NO_COMBO;
         push(t, i);
         skill_count++;
       }
@@ -81,7 +103,7 @@ std::unordered_map<uint64_t, std::vector<std::pair<AdvState, ActionCode>>> compu
       // basic
       {
         AdvState t = s;
-        t.s.combo_ = (t.s.combo_ + 1) % 5;
+        t.s.combo_ = next_combo_state(t.s.combo_);
         for (int i = 0; i < 2; i++) {
           t.s.sp_[i] = std::min(t.s.sp_[i] + COMBO_SP[t.s.combo_], SKILL_SP[i]);
         }
@@ -90,7 +112,7 @@ std::unordered_map<uint64_t, std::vector<std::pair<AdvState, ActionCode>>> compu
       // force strike
       {
         AdvState t = s;
-        t.s.combo_ = 99;
+        t.s.combo_ = AFTER_FS;
         for (int i = 0; i < 2; i++) {
           t.s.sp_[i] = std::min(t.s.sp_[i] + FS_SP, SKILL_SP[i]);
         }
@@ -101,13 +123,15 @@ std::unordered_map<uint64_t, std::vector<std::pair<AdvState, ActionCode>>> compu
   return comes_from;
 }
 
+using AdvStateId = int;
+
 int main() {
   auto states = compute_states();
 
   // We want to make a table of the states, so assign them a contiguous
   // numbering
-  std::unordered_map<uint64_t, int> state2ix;
-  std::vector<uint64_t> ix2state;
+  std::unordered_map<AdvStateCode, AdvStateId> state2ix;
+  std::vector<AdvStateCode> ix2state;
   ix2state.reserve(states.size());
   for (auto s : states) {
     state2ix.insert({s.first, ix2state.size()});
@@ -151,20 +175,22 @@ int main() {
         const char* action = "?";
         if (ac == -1) {
           action = "x";
-          if (p_st.s.combo_ == -1) {
-            frames += 0;
-          } else if (p_st.s.combo_ == 99) {
-            frames += FS_RECOVERY;
+          if (p_st.s.combo_ == NO_COMBO) {
+            frames += COMBO_STARTUP;
+          } else if (p_st.s.combo_ == AFTER_FS) {
+            frames += FS_RECOVERY + COMBO_STARTUP;
           } else {
             frames += COMBO_RECOVERY[p_st.s.combo_];
+            if (p_st.s.combo_ == AFTER_C5) {
+              frames += COMBO_STARTUP;
+            }
           }
-          if (st.s.combo_ == 0) frames += COMBO_STARTUP;
           dmg = COMBO_DMG[st.s.combo_];
         } else if (ac == -2) {
           action = "f";
-          if (p_st.s.combo_ == -1) {
+          if (p_st.s.combo_ == NO_COMBO) {
             frames += FS_STARTUP;
-          } else if (p_st.s.combo_ == 99) {
+          } else if (p_st.s.combo_ == AFTER_FS) {
             frames += FS_STARTUP + FS_RECOVERY;
           } else {
             frames += XFS_STARTUP[p_st.s.combo_];
@@ -205,54 +231,48 @@ int main() {
         switch (c) {
           case 'x':
             switch (st.s.combo_) {
-              case -1:
+              case NO_COMBO:
                 frames += COMBO_STARTUP;
-                dmg += COMBO_DMG[0];
-                st.s.combo_ = 0;
                 break;
-              case 99:
+              case AFTER_FS:
                 frames += FS_RECOVERY + COMBO_STARTUP;
-                dmg += COMBO_DMG[0];
-                st.s.combo_ = 0;
-                break;
-              case 4:
-                frames += COMBO_RECOVERY[4] + COMBO_STARTUP;
-                dmg += COMBO_DMG[0];
-                st.s.combo_ = 0;
                 break;
               default:
                 frames += COMBO_RECOVERY[st.s.combo_];
-                dmg += COMBO_DMG[st.s.combo_ + 1];
-                st.s.combo_++;
+                if (st.s.combo_ == AFTER_C5) {
+                  frames += COMBO_STARTUP;
+                }
                 break;
             }
+            dmg += COMBO_DMG[next_combo_state(st.s.combo_)];
+            st.s.combo_ = next_combo_state(st.s.combo_);
             break;
           case '1':
             frames += SKILL_STARTUP;
             frames += SKILL_FRAMES[0];
             dmg += SKILL_DMG[0];
-            st.s.combo_ = -1;
+            st.s.combo_ = NO_COMBO;
             break;
           case '2':
             frames += SKILL_STARTUP;
             frames += SKILL_FRAMES[1];
             dmg += SKILL_DMG[1];
-            st.s.combo_ = -1;
+            st.s.combo_ = NO_COMBO;
             break;
           case 'f':
             dmg += FS_DMG;
             switch (st.s.combo_) {
-              case -1:
+              case NO_COMBO:
                 frames += FS_STARTUP;
                 break;
-              case 99:
+              case AFTER_FS:
                 frames += FS_STARTUP + FS_RECOVERY;
                 break;
               default:
                 frames += XFS_STARTUP[st.s.combo_];
                 break;
             }
-            st.s.combo_ = 99;
+            st.s.combo_ = AFTER_FS;
             break;
           default:
             std::cerr << "Invalid action: " << c << "\n";
