@@ -272,7 +272,44 @@ int main(int argc, char** argv) {
     }
     if (best >= 0) {
       if (best >= 0 && best > last_best) {
-        std::cerr << best_seq << " for " << best << " dmg in " << f << " frames\n";
+        if (true) {
+          int combo_count = 0;
+          auto print_combo = [&](bool trailing_space = true) {
+            if (combo_count) {
+              std::cerr << "c" << combo_count;
+              if (trailing_space) {
+                std::cerr << " ";
+              }
+              combo_count = 0;
+            }
+          };
+          for (auto c : best_seq) {
+            switch (c) {
+              case 'x':
+                if (combo_count == 5) {
+                  print_combo();
+                }
+                combo_count++;
+                break;
+              case 'f':
+                print_combo(/*trailing_space*/ false);
+                std::cerr << "fs ";
+                break;
+              case '1':
+                print_combo();
+                std::cerr << "s1   ";
+                break;
+              case '2':
+                print_combo();
+                std::cerr << "s2   ";
+                break;
+            }
+          }
+          print_combo();
+        } else {
+          std::cerr << best_seq << " ";
+        }
+        std::cerr << "=> " << best << " dmg in " << f << " frames\n";
         last_best = best;
       }
     }
