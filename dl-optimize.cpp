@@ -67,11 +67,11 @@ static_assert(sizeof(AdvState) == sizeof(AdvStateCode), "AdvState packs");
 
 constexpr AdvState INIT_ST = { .s = { .sp_ = {0, 0}, .combo_ = NO_COMBO } };
 
-// -2 = force strike
-// -1 = basic combo
-// 0 = s1
-// 1 = s2
-using ActionCode = int;
+// 'f' = force strike
+// 'x' = basic combo
+// '1' = S1
+// '2' = S2
+using ActionCode = char;
 
 // Map from AdvState k to AdvStates which, when taking ActionCode, result
 // in k
@@ -95,7 +95,7 @@ ComesFrom compute_states() {
         AdvState t = s;
         t.s.sp_[i] = 0;
         t.s.combo_ = NO_COMBO;
-        push(t, i);
+        push(t, '1' + i);
         skill_count++;
       }
     }
@@ -107,7 +107,7 @@ ComesFrom compute_states() {
         for (int i = 0; i < 2; i++) {
           t.s.sp_[i] = std::min(t.s.sp_[i] + COMBO_SP[t.s.combo_], SKILL_SP[i]);
         }
-        push(t, -1);
+        push(t, 'x');
       }
       // force strike
       {
@@ -116,7 +116,7 @@ ComesFrom compute_states() {
         for (int i = 0; i < 2; i++) {
           t.s.sp_[i] = std::min(t.s.sp_[i] + FS_SP, SKILL_SP[i]);
         }
-        push(t, -2);
+        push(t, 'f');
       }
     }
   }
@@ -172,9 +172,7 @@ int main() {
 
         int frames = 0;
         int dmg = 0;
-        const char* action = "?";
-        if (ac == -1) {
-          action = "x";
+        if (ac == 'x') {
           if (p_st.s.combo_ == NO_COMBO) {
             frames += COMBO_STARTUP;
           } else if (p_st.s.combo_ == AFTER_FS) {
@@ -186,8 +184,7 @@ int main() {
             }
           }
           dmg = COMBO_DMG[st.s.combo_];
-        } else if (ac == -2) {
-          action = "f";
+        } else if (ac == 'f') {
           if (p_st.s.combo_ == NO_COMBO) {
             frames += FS_STARTUP;
           } else if (p_st.s.combo_ == AFTER_FS) {
@@ -197,10 +194,9 @@ int main() {
           }
           dmg = FS_DMG;
         } else {
-          action = ac == 0 ? "1" : "2";
           frames += SKILL_STARTUP;
-          frames += SKILL_FRAMES[ac];
-          dmg = SKILL_DMG[ac];
+          frames += SKILL_FRAMES[ac - '1'];
+          dmg = SKILL_DMG[ac - '1'];
         }
 
         if (f >= frames) {
@@ -208,7 +204,7 @@ int main() {
           auto tmp = best_dps[z] + dmg;
           if (tmp > cur) {
             cur = tmp;
-            cur_seq = best_sequence[z] + action;
+            cur_seq = best_sequence[z] + ac;
           }
         }
       }
@@ -280,7 +276,9 @@ int main() {
         }
       }
       if (dmg != best || frames != f) {
-        std::cerr << "VALIDATION FAILED: validator says " << dmg << " in " << frames << " but optimizer thought " << best << " in " << f << "\n";
+        std::cerr << "VALIDATION FAILED: validator says "
+            << dmg << " in " << frames << " but optimizer thought "
+            << best << " in " << f << "\n";
         return -1;
       }
       std::cerr << best_seq << " for " << best << " dmg in " << f << " frames\n";
