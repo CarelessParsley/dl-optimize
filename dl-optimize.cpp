@@ -36,6 +36,10 @@ constexpr int SKILL_STARTUP = 6;
 constexpr int SKILL_RECOVERY[3] = {111, 114, 54};
 constexpr int SKILL_MOD[3] = {1036, 933, 0};
 
+// UI gets hidden this long when you skill; you can't
+// queue another skill until you wait for the UI to come back
+constexpr int UI_RECOVERY = 114;
+
 // Axe
 constexpr int COMBO_SP[5] = {200, 240, 360, 380, 420};
 constexpr int COMBO_STARTUP = 16;
@@ -195,7 +199,20 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
         break;
     }
   } else {
-    // Skill cancels all recovery
+    // Skill cancels all non-skill recovery; and skill recovery
+    // may be increased by UI being hidden (human only; AI not
+    // affected by this.)
+    switch (p_st.s.combo_) {
+      case AFTER_S1:
+        frames += std::max(SKILL_RECOVERY[0], UI_RECOVERY);
+        break;
+      case AFTER_S2:
+        frames += std::max(SKILL_RECOVERY[1], UI_RECOVERY);
+        break;
+      case AFTER_S3:
+        frames += std::max(SKILL_RECOVERY[2], UI_RECOVERY);
+        break;
+    }
     frames += SKILL_STARTUP;
   }
   return frames;
