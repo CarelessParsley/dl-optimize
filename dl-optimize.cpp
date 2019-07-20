@@ -7,34 +7,27 @@
 #include <utility>
 
 namespace std {
+  template<typename T>
+  inline void hash_combine(std::size_t& seed, const T& val) {
+    std::hash<T> hasher;
+    seed ^= hasher(val) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  }
 
-    template<typename T>
-    inline void hash_combine(std::size_t& seed, const T& val)
-    {
-        std::hash<T> hasher;
-        seed ^= hasher(val) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  // taken from https://stackoverflow.com/a/7222201/916549
+  template<typename S, typename T>
+  struct hash<std::pair<S, T>> {
+    inline size_t operator()(const std::pair<S, T>& val) const {
+      size_t seed = 0;
+      hash_combine(seed, val.first);
+      hash_combine(seed, val.second);
+      return seed;
     }
-
-    //  taken from https://stackoverflow.com/a/7222201/916549
-    //
-    template<typename S, typename T>
-    struct hash<std::pair<S, T>>
-    {
-        inline size_t operator()(const std::pair<S, T>& val) const
-        {
-            size_t seed = 0;
-            hash_combine(seed, val.first);
-            hash_combine(seed, val.second);
-            return seed;
-        }
-    };
-
+  };
 }
 
 // Erik
 constexpr double STRENGTH = 2980.56;
 
-//constexpr int NUM_SKILLS = 3;
 constexpr int NUM_SKILLS = 2;
 
 constexpr int SKILL_SP[3] = {2868, 5883, 4711};
@@ -286,7 +279,9 @@ int main(int argc, char** argv) {
   std::vector<N> ns;
   std::unordered_map<AdvStateCode, NId> c2n;
 
-  {
+  constexpr bool reduce_states = false;
+
+  if (reduce_states) {
     // We need to setup some auxiliary structs.  First,
     // we need to construct an initial partition of adventurer
     // states.  This is done by mapping every adventurer
@@ -412,7 +407,8 @@ int main(int argc, char** argv) {
 
   int num_states;
   ComesFrom action_inverse;
-  if (1) {
+  PId initial_state;
+  if (reduce_states) {
     ix2state.resize(ps.size());
     for (NId n = 0; n < ns.size(); n++) {
       state2ix[ns[n].st_] = ns[n].pid_;
@@ -433,14 +429,17 @@ int main(int argc, char** argv) {
     for (const auto& kv : action_inverse_set) {
       action_inverse[kv.first] = std::vector<std::pair<AdvState, char>>(kv.second.begin(), kv.second.end());
     }
+    initial_state = ns[c2n[INIT_ST.c]].pid_;
   } else {
     ix2state.reserve(states.size());
     for (auto s : states) {
+      PId p = ix2state.size();
       state2ix.insert({s.first, ix2state.size()});
       ix2state.push_back(s.first);
+      action_inverse[p] = s.second;
     }
     num_states = states.size();
-    action_inverse = states;
+    initial_state = state2ix[INIT_ST.c];
   }
 
   ps.clear();
@@ -448,14 +447,30 @@ int main(int argc, char** argv) {
 
   std::cerr << "final num states = " << num_states << "\n";
 
-  std::vector<double> best_dps(frames * num_states, -1);
-  std::vector<std::string> best_sequence(frames * num_states);
+  // Compute necessary frame window
+  int max_frames = 0;
+  for (int s = 0; s < num_states; s++) {
+    for (auto pair : action_inverse[s]) {
+      AdvState p_st;
+      ActionCode ac;
+      std::tie(p_st, ac) = pair;
+      int frames = compute_frames(p_st, ac, AdvState{ .c = ix2state[s] });
+      if (frames > max_frames) {
+        max_frames = frames;
+      }
+    }
+  }
+
+  std::cerr << "max frame window = " << max_frames << "\n";
+
+  std::vector<double> best_dps(max_frames * num_states, -1);
+  std::vector<std::string> best_sequence(max_frames * num_states);
 
   auto dix = [&](int frame, int state_ix) {
-    return frame * num_states + state_ix;
+    return (frame % max_frames) * num_states + state_ix;
   };
 
-  best_dps[dix(0, ns[c2n[INIT_ST.c]].pid_)] = 0;
+  best_dps[dix(0, initial_state)] = 0;
 
   double last_best = 0;
   for (int f = 1; f < frames; f++) {
