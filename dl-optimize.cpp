@@ -525,7 +525,7 @@ int main(int argc, char** argv) {
     }
     if (best >= 0) {
       if (best >= 0 && best > last_best) {
-        if (0) {
+        if (1) {
           int combo_count = 0;
           auto print_combo = [&](bool trailing_space = true) {
             if (combo_count) {
