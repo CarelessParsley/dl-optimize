@@ -28,7 +28,8 @@ namespace std {
 // Erik
 constexpr double STRENGTH = 2980.56;
 
-constexpr int NUM_SKILLS = 2;
+constexpr int NUM_SKILLS = 3;
+constexpr bool reduce_states = true;
 
 constexpr int SKILL_SP[3] = {2868, 5883, 4711};
 constexpr int SKILL_STARTUP = 6;
@@ -95,6 +96,8 @@ ComboState next_combo_state(ComboState combo) {
       return AFTER_C5;
     case AFTER_C5:
       return AFTER_C1;
+    default:
+      assert(false);
       /*
     default:
       return static_cast<ComboState>((combo + 1) % 5);
@@ -136,7 +139,7 @@ std::ostream& operator<<(std::ostream& os, AdvState st) {
 }
 
 constexpr AdvState INIT_ST = { .s =
-  { .sp_ = {0, 0}, .combo_ = NO_COMBO, .buff_frames_left_ = 0 } };
+  { .sp_ = {0, 0, 0}, .combo_ = NO_COMBO, .buff_frames_left_ = 0 } };
 
 // 'f' = force strike
 // 'x' = basic combo
@@ -220,8 +223,8 @@ ComesFrom compute_states() {
         t.s.combo_ = static_cast<ComboState>(AFTER_S1 + i);
         // S3 buff
         if (i == 2) {
-          //t.s.buff_frames_left_ = 20 * 60;
-          t.s.buff_frames_left_ = 0;
+          t.s.buff_frames_left_ = 20 * 60;
+          //t.s.buff_frames_left_ = 0;
         } else {
           t.s.buff_frames_left_ = std::max(0, t.s.buff_frames_left_ - compute_frames(s, '1' + i, t));
         }
@@ -278,8 +281,6 @@ int main(int argc, char** argv) {
   std::vector<P> ps; // partitions
   std::vector<N> ns;
   std::unordered_map<AdvStateCode, NId> c2n;
-
-  constexpr bool reduce_states = false;
 
   if (reduce_states) {
     // We need to setup some auxiliary structs.  First,
@@ -448,7 +449,7 @@ int main(int argc, char** argv) {
   std::cerr << "final num states = " << num_states << "\n";
 
   // Compute necessary frame window
-  int max_frames = 0;
+  int max_frames = 1;
   for (int s = 0; s < num_states; s++) {
     for (auto pair : action_inverse[s]) {
       AdvState p_st;
@@ -456,7 +457,7 @@ int main(int argc, char** argv) {
       std::tie(p_st, ac) = pair;
       int frames = compute_frames(p_st, ac, AdvState{ .c = ix2state[s] });
       if (frames > max_frames) {
-        max_frames = frames;
+        max_frames = frames + 1;
       }
     }
   }
@@ -473,6 +474,39 @@ int main(int argc, char** argv) {
   best_dps[dix(0, initial_state)] = 0;
 
   double last_best = 0;
+  // This is the bottleneck!
+  //  - Snapshotting (so I can continue computing later)
+  //  - Double => Float
+  //  - More state reduction?
+  //    - Unsound approximations
+  //  - Branch bound (we KNOW that this is provably worse,
+  //    prune it)
+  //    - Same combo, same buff, dps is less, SP is less
+  //    - Best case "catch up" for states
+  //  - Improve locality of access?
+  //    - Only five actions: bucket them together
+  //    - Lay out action_inverses contiguously, so we don't
+  //      thrash cache
+  //  - Estimate time left
+  //  - Implement best sequence in a less shitty way
+  //    - Bit pack
+  //    - "Everything is roughly the same size, do the
+  //      allocation inline"
+  //  - Take advantage of sparsity
+  //    - Early on, most states are not accessible.  Only
+  //      at a certain load factor should we densify.
+  //  - Parallelize/Vectorize...
+  //    - ...computation of all incoming actions (no
+  //      data dependency, reduction at the end)
+  //    - ...computation of all states at the same
+  //      frame (no data dependency, reduction at the end)
+  //    - ...all frames within the minimum frame window
+  //      (provably no data dependency.)
+  //  - Small optimizations
+  //    - Compute best as we go (in the main loop), rather
+  //      than another single loop at the end
+  //
+  //  - Get some C++ library and build with it
   for (int f = 1; f < frames; f++) {
     for (int s = 0; s < num_states; s++) {
       AdvState st;
@@ -494,7 +528,7 @@ int main(int argc, char** argv) {
         } else if (ac == 'f') {
           mod = FS_MOD;
         } else {
-          mod = SKILL_MOD[ac == '1' ? 0 : 1];
+          mod = SKILL_MOD[ac - '1'];
         }
 
         if (f >= frames) {
@@ -507,7 +541,7 @@ int main(int argc, char** argv) {
             // dmg *= buffs;
             // dmg *= coab;
             dmg *= ((double)mod)/100;
-            if (ac == '1' || ac == '2') {
+            if (ac == '1' || ac == '2' || ac == '3') {
               dmg *= 1.4; // skill_ab, from KFM + FitF
               // dmg *= skill_buffs;
               // dmg *= skill_coab;
@@ -517,7 +551,7 @@ int main(int argc, char** argv) {
             // dmg *= punisher;
             // dmg *= elemental;
             dmg /= 10. * 1.;  // defense * defense change
-            dmg *= (1. + (0.04 + 0.14 /*KFM*/) * (0.7 + 0.15 /* FitF */)); // crit rate * crit damage
+            dmg *= (1. + (0.04 + 0.14 /*KFM*/) * (0.7 + 0.15 /* FitF */ + (p_st.s.buff_frames_left_ > 0 ? 0.50 : 0))); // crit rate * crit damage
 
             auto tmp = best_dps[z] + dmg;
             if (tmp >= 0 && tmp > cur) {
@@ -571,6 +605,12 @@ int main(int argc, char** argv) {
                 print_combo();
                 std::cerr << "s2   ";
                 break;
+              case '3':
+                print_combo();
+                std::cerr << "s3   ";
+                break;
+              default:
+                assert(0);
             }
           }
           print_combo();
