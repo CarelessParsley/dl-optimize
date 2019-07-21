@@ -155,6 +155,186 @@ constexpr AdvState INIT_ST = { .s =
 // '3' - S3
 using ActionCode = char;
 
+// Fixed size encoding of action strings.  Supports "compressed" action
+// string of size up to 32, in 16 bytes of space.  "Null" terminated.
+
+// Implementation notes:
+//  - Implement best sequence in a less shitty way
+//    - Bit pack
+//    - "Everything is roughly the same size, do the
+//      allocation inline"
+//        - On S1/S2 only Erik, combo length is
+//          something like frames/53+1 (this underestimates
+//          is some cases).  After 60s you end up with
+//          rotation length 67.
+//
+//          Action code currently has 5 elements x f s1 s2 s3
+//          (irritatingly).  So 3-bit necessary (but probably 4-bit
+//          easier to pack.)
+//
+//          We can do a variable length encoding, based on domain
+//          specific knowledge.  Here are a number of fairly
+//          likely substrings:
+//
+//            c1
+//            c2
+//            c3
+//            c4
+//            c5
+//            c1fs
+//            c2fs
+//            c3fs
+//            c4fs
+//            c5fs
+//            s1
+//            s2
+//            s3
+//            fs
+//
+//          Can we guess what the compression factor here is?
+//
+//          Empirically, 60 frames max size is 25.  So 32 4-bit
+//          characters: 16 bytes.
+//
+//          This is like 9G for Erik with S3.
+//        - Let's arbitrarily decide maximum length is 64.  Idea:
+//          if you OOM, you'll have a snapshot you can restart
+//          from (this means that snapshots need to be resizable)?
+//          Or just, no one actually cares about 60s; just go as
+//          far as you can get.
+//
+// FORMAT:
+//  low bits are index 0
+//  high bits are index 1
+//
+
+enum class ActionFragment : uint8_t { // actually only four bit
+  NIL = 0,
+  // NB: We rely on C1-C5 being contiguous
+  C1,
+  C2,
+  C3,
+  C4,
+  C5,
+  // NB: We rely on C1FS = C1 + 5
+  C1FS,
+  C2FS,
+  C3FS,
+  C4FS,
+  C5FS,
+  FS,
+  S1,
+  S2,
+  S3,
+  // 15 (one free slot)
+};
+
+struct ActionString {
+  std::array<uint8_t, 16> buffer_;
+  static ActionFragment i2f(uint8_t c) {
+    return static_cast<ActionFragment>(c);
+  }
+  static uint8_t f2i(ActionFragment c) {
+    return static_cast<uint8_t>(c);
+  }
+  static ActionFragment _unpack(uint8_t c, int i) {
+    if (i == 0) {
+      return i2f(c & 0x0F);
+    } else {
+      return i2f((c & 0xF0) >> 4);
+    }
+  }
+  static uint8_t _pack(ActionFragment first, ActionFragment second) {
+    return f2i(first) | (f2i(second) << 4);
+  }
+  static int _null_at(uint8_t c) {
+    if (c == 0) return 0;
+    if (_unpack(c, 1) == ActionFragment::NIL) {
+      assert(_unpack(c, 0) != ActionFragment::NIL);
+      return 1;
+    }
+    return -1;
+  }
+  ActionFragment get(int i) {
+    uint8_t c = buffer_[i / 2];
+    return _unpack(c, i % 2);
+  }
+  // Assignment not supported.  vector<bool>, rest in peace!
+  ActionFragment operator[](int i) {
+    return get(i);
+  }
+  void set(int i, ActionFragment f) {
+    uint8_t c = buffer_[i / 2];
+    ActionFragment first = _unpack(c, 0);
+    ActionFragment second = _unpack(c, 1);
+    if (i % 2 == 0) {
+      first = f;
+    } else {
+      second = f;
+    }
+    buffer_[i / 2] = _pack(first, second);
+  }
+  void push(ActionCode ac) {
+    int loc = -1;
+    for (int i = 0; i < 16; i++) {
+      int j = _null_at(buffer_[i]);
+      if (j != -1) {
+        loc = i * 2 + j;
+        break;
+      }
+    }
+    assert(loc != -1);
+    // Check if we can absorb this into the
+    // previous entry
+    if (loc != 0) {
+      ActionFragment p_c = get(loc - 1);
+      switch (ac) {
+        case 'x':
+          switch (p_c) {
+            case ActionFragment::C1:
+            case ActionFragment::C2:
+            case ActionFragment::C3:
+            case ActionFragment::C4:
+              set(loc - 1, i2f(f2i(p_c) + 1));
+              return;
+          }
+        case 'f':
+          switch (p_c) {
+            case ActionFragment::C1:
+            case ActionFragment::C2:
+            case ActionFragment::C3:
+            case ActionFragment::C4:
+            case ActionFragment::C5:
+              set(loc - 1, i2f(f2i(p_c) + 5));
+              return;
+          }
+      }
+    }
+    ActionFragment c;
+    switch (ac) {
+      case 'x':
+        c = ActionFragment::C1;
+        break;
+      case 'f':
+        c = ActionFragment::FS;
+        break;
+      case '1':
+        c = ActionFragment::S1;
+        break;
+      case '2':
+        c = ActionFragment::S2;
+        break;
+      case '3':
+        c = ActionFragment::S3;
+        break;
+      default:
+        assert(0);
+    }
+    set(loc, c);
+  }
+};
+
+
 // Map from AdvState k to AdvStates which, when taking ActionCode, result
 // in k
 using ComesFrom = std::unordered_map<AdvStateCode, std::vector<std::pair<AdvState, ActionCode>>>;
@@ -546,40 +726,6 @@ int main(int argc, char** argv) {
   //    - Lay out action_inverses contiguously, so we don't
   //      thrash cache
   //  - Estimate time left
-  //  - Implement best sequence in a less shitty way
-  //    - Bit pack
-  //    - "Everything is roughly the same size, do the
-  //      allocation inline"
-  //        - On S1/S2 only Erik, combo length is
-  //          something like frames/53+1 (this underestimates
-  //          is some cases).  After 60s you end up with
-  //          rotation length 67.
-  //
-  //          Action code currently has 5 elements x f s1 s2 s3
-  //          (irritatingly).  So 3-bit necessary (but probably 4-bit
-  //          easier to pack.)
-  //
-  //          We can do a variable length encoding, based on domain
-  //          specific knowledge.  Here are a number of fairly
-  //          likely substrings:
-  //
-  //            c1
-  //            c2
-  //            c3
-  //            c4
-  //            c5
-  //            c1fs
-  //            c2fs
-  //            c3fs
-  //            c4fs
-  //            c5fs
-  //            s1
-  //            s2
-  //            s3
-  //            fs
-  //
-  //          Can we guess what the compression factor here is?
-  //
   //  - Take advantage of sparsity
   //    - Early on, most states are not accessible.  Only
   //      at a certain load factor should we densify.
@@ -662,6 +808,7 @@ int main(int argc, char** argv) {
     float best = -1;
     std::string best_seq = "";
     int max_seq_len = 0;
+    int max_compressed_seq_len = 0;
     int density = 0;
     for (int s = 0; s < num_states; s++) {
       auto tmp = best_dps[dix(f, s)];
@@ -672,9 +819,39 @@ int main(int argc, char** argv) {
       if (tmp > 0) {
         density++;
         max_seq_len = std::max(max_seq_len, static_cast<int>(best_sequence[dix(f, s)].length()));
+        int tmp_compressed_seq_len = 0;
+        int combo_count = 0;
+        for (auto c : best_sequence[dix(f, s)]) {
+          switch (c) {
+            case 'x':
+              if (combo_count == 5) {
+                tmp_compressed_seq_len++;
+                combo_count = 0;
+              }
+              combo_count++;
+              break;
+            case 'f':
+              combo_count = 0;
+              tmp_compressed_seq_len++;
+              break;
+            case '1':
+            case '2':
+            case '3':
+              if (combo_count != 0) {
+                tmp_compressed_seq_len++;
+                combo_count = 0;
+              }
+              tmp_compressed_seq_len++;
+              break;
+            default:
+              assert(0);
+          }
+        }
+        max_compressed_seq_len = std::max(max_compressed_seq_len, tmp_compressed_seq_len);
       }
     }
     // std::cerr << "" << f << ", " << max_seq_len << ", " << density << "\n";
+    std::cerr << "" << f << ", " << max_compressed_seq_len << "\n";
     if (best >= 0) {
       if (best >= 0 && best > last_best + EPSILON) {
         if (1) {
