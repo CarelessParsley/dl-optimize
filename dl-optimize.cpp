@@ -31,7 +31,7 @@ namespace std {
 constexpr double EPSILON = 0.01;
 
 // Configuration
-constexpr int NUM_SKILLS = 2; // How many skills to consider calculation for
+constexpr int NUM_SKILLS = 3; // How many skills to consider calculation for
 constexpr bool reduce_states = true; // Whether or not to apply state space reduction with Hopcroft
 
 // Erik's stats
@@ -814,6 +814,9 @@ int main(int argc, char** argv) {
   //  - Take advantage of sparsity
   //    - Early on, most states are not accessible.  Only
   //      at a certain load factor should we densify.
+  //    - Actually, in practice, we already get better performance here,
+  //      because boring states don't end up doing any FP computation.
+  //      Easily see 2x slowdown when we saturate.
   //  - Parallelize/Vectorize...
   //    - ...computation of all incoming actions (no
   //      data dependency, reduction at the end)
