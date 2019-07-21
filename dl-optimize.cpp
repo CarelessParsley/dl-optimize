@@ -208,21 +208,25 @@ using ActionCode = char;
 //  high bits are index 1
 //
 
+// Order of this class matters!  It determines what the "preferred"
+// action at any given point in time is (bottom is "most preferred")
+// So for example suppose we have c1fs c5fs and c5fs c1fs as possible
+// optimal combos; we prefer to take the latter ("front loading" long
+// combos).
 enum class ActionFragment : uint8_t { // actually only four bit
   NIL = 0,
-  // NB: We rely on C1-C5 being contiguous
-  C1,
-  C2,
-  C3,
-  C4,
-  C5,
-  // NB: We rely on C1FS = C1 + 5
-  C1FS,
-  C2FS,
-  C3FS,
-  C4FS,
-  C5FS,
   FS,
+  // NB: We rely on C1-C5/C1FS-C5FS being interleaved in this way
+  C1,
+  C1FS,
+  C2,
+  C2FS,
+  C3,
+  C3FS,
+  C4,
+  C4FS,
+  C5,
+  C5FS,
   S1,
   S2,
   S3,
@@ -230,7 +234,7 @@ enum class ActionFragment : uint8_t { // actually only four bit
 };
 
 struct ActionString {
-  std::array<uint8_t, 16> buffer_;
+  std::array<uint8_t, 16> buffer_ = {};
   static ActionFragment i2f(uint8_t c) {
     return static_cast<ActionFragment>(c);
   }
@@ -239,13 +243,16 @@ struct ActionString {
   }
   static ActionFragment _unpack(uint8_t c, int i) {
     if (i == 0) {
-      return i2f(c & 0x0F);
-    } else {
       return i2f((c & 0xF0) >> 4);
+    } else {
+      return i2f(c & 0x0F);
     }
   }
   static uint8_t _pack(ActionFragment first, ActionFragment second) {
-    return f2i(first) | (f2i(second) << 4);
+    // NB: It matters that the first element is higher order bits;
+    // this means that comparison treats first as most significant,
+    // which coincides with lexicographic ordering
+    return (f2i(first) << 4) | f2i(second);
   }
   static int _null_at(uint8_t c) {
     if (c == 0) return 0;
@@ -255,12 +262,12 @@ struct ActionString {
     }
     return -1;
   }
-  ActionFragment get(int i) {
+  ActionFragment get(int i) const {
     uint8_t c = buffer_[i / 2];
     return _unpack(c, i % 2);
   }
   // Assignment not supported.  vector<bool>, rest in peace!
-  ActionFragment operator[](int i) {
+  ActionFragment operator[](int i) const {
     return get(i);
   }
   void set(int i, ActionFragment f) {
@@ -295,7 +302,7 @@ struct ActionString {
             case ActionFragment::C2:
             case ActionFragment::C3:
             case ActionFragment::C4:
-              set(loc - 1, i2f(f2i(p_c) + 1));
+              set(loc - 1, i2f(f2i(p_c) + 2));
               return;
           }
         case 'f':
@@ -305,7 +312,7 @@ struct ActionString {
             case ActionFragment::C3:
             case ActionFragment::C4:
             case ActionFragment::C5:
-              set(loc - 1, i2f(f2i(p_c) + 5));
+              set(loc - 1, i2f(f2i(p_c) + 1));
               return;
           }
       }
@@ -333,6 +340,61 @@ struct ActionString {
     set(loc, c);
   }
 };
+
+std::ostream& operator<<(std::ostream& os, const ActionString& as) {
+  for (int i = 0; i < 32; i++) {
+    ActionFragment f = as.get(i);
+    switch(f) {
+      case ActionFragment::NIL:
+        return os;
+      case ActionFragment::C1:
+        os << "c1 ";
+        break;
+      case ActionFragment::C2:
+        os << "c2 ";
+        break;
+      case ActionFragment::C3:
+        os << "c3 ";
+        break;
+      case ActionFragment::C4:
+        os << "c4 ";
+        break;
+      case ActionFragment::C5:
+        os << "c5 ";
+        break;
+      case ActionFragment::C1FS:
+        os << "c1fs ";
+        break;
+      case ActionFragment::C2FS:
+        os << "c2fs ";
+        break;
+      case ActionFragment::C3FS:
+        os << "c3fs ";
+        break;
+      case ActionFragment::C4FS:
+        os << "c4fs ";
+        break;
+      case ActionFragment::C5FS:
+        os << "c5fs ";
+        break;
+      case ActionFragment::FS:
+        os << "fs ";
+        break;
+      case ActionFragment::S1:
+        os << "s1  ";
+        break;
+      case ActionFragment::S2:
+        os << "s2  ";
+        break;
+      case ActionFragment::S3:
+        os << "s3  ";
+        break;
+      default:
+        assert(0);
+    }
+  }
+  return os;
+}
 
 
 // Map from AdvState k to AdvStates which, when taking ActionCode, result
@@ -666,10 +728,10 @@ int main(int argc, char** argv) {
   std::cerr << "max frame window = " << max_frames << "\n";
 
   int buffer_size = max_frames * num_states;
-  std::cerr << "projected memory usage = " << (buffer_size * sizeof(float)) / (1 << 20) << " MB\n";
+  std::cerr << "projected memory usage = " << (buffer_size * (sizeof(float) + sizeof(ActionString))) / (1 << 20) << " MB\n";
 
   std::vector<float> best_dps(buffer_size, -1);
-  std::vector<std::string> best_sequence(max_frames * num_states);
+  std::vector<ActionString> best_sequence(max_frames * num_states);
 
   auto dix = [&](int frame, int state_ix) {
     return (frame % max_frames) * num_states + state_ix;
@@ -791,12 +853,13 @@ int main(int argc, char** argv) {
             if (tmp >= 0 && tmp > cur + EPSILON) {
               // std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
               cur = tmp;
-              cur_seq = best_sequence[z] + ac;
+              cur_seq = best_sequence[z];
+              cur_seq.push(ac);
             } else if (tmp >= 0 && tmp > cur - EPSILON) {
-              std::string tmp_seq = best_sequence[z] + ac;
-              // This compare is expensive but it greatly improves the
-              // quality of the combos we produce
-              if (std::lexicographical_compare(cur_seq.begin(), cur_seq.end(), tmp_seq.begin(), tmp_seq.end())) {
+               // TODO: reimplement this
+              ActionString tmp_seq = best_sequence[z];
+              tmp_seq.push(ac);
+              if (std::lexicographical_compare(cur_seq.buffer_.begin(), cur_seq.buffer_.end(), tmp_seq.buffer_.begin(), tmp_seq.buffer_.end())) {
                 cur = tmp;
                 cur_seq = std::move(tmp_seq);
               }
@@ -806,97 +869,31 @@ int main(int argc, char** argv) {
       }
     }
     float best = -1;
-    std::string best_seq = "";
-    int max_seq_len = 0;
-    int max_compressed_seq_len = 0;
+    int best_index = -1;
     int density = 0;
     for (int s = 0; s < num_states; s++) {
       auto tmp = best_dps[dix(f, s)];
       if (tmp > best + EPSILON) {
         best = tmp;
-        best_seq = best_sequence[dix(f, s)];
+        best_index = dix(f, s);
       }
       if (tmp > 0) {
         density++;
-        max_seq_len = std::max(max_seq_len, static_cast<int>(best_sequence[dix(f, s)].length()));
-        int tmp_compressed_seq_len = 0;
-        int combo_count = 0;
-        for (auto c : best_sequence[dix(f, s)]) {
-          switch (c) {
-            case 'x':
-              if (combo_count == 5) {
-                tmp_compressed_seq_len++;
-                combo_count = 0;
-              }
-              combo_count++;
-              break;
-            case 'f':
-              combo_count = 0;
-              tmp_compressed_seq_len++;
-              break;
-            case '1':
-            case '2':
-            case '3':
-              if (combo_count != 0) {
-                tmp_compressed_seq_len++;
-                combo_count = 0;
-              }
-              tmp_compressed_seq_len++;
-              break;
-            default:
-              assert(0);
-          }
-        }
-        max_compressed_seq_len = std::max(max_compressed_seq_len, tmp_compressed_seq_len);
       }
     }
-    // std::cerr << "" << f << ", " << max_seq_len << ", " << density << "\n";
-    std::cerr << "" << f << ", " << max_compressed_seq_len << "\n";
     if (best >= 0) {
       if (best >= 0 && best > last_best + EPSILON) {
-        if (1) {
-          int combo_count = 0;
-          auto print_combo = [&](bool trailing_space = true) {
-            if (combo_count) {
-              std::cout << "c" << combo_count;
-              if (trailing_space) {
-                std::cout << " ";
-              }
-              combo_count = 0;
+        int combo_count = 0;
+        auto print_combo = [&](bool trailing_space = true) {
+          if (combo_count) {
+            std::cout << "c" << combo_count;
+            if (trailing_space) {
+              std::cout << " ";
             }
-          };
-          for (auto c : best_seq) {
-            switch (c) {
-              case 'x':
-                if (combo_count == 5) {
-                  print_combo();
-                }
-                combo_count++;
-                break;
-              case 'f':
-                print_combo(/*trailing_space*/ false);
-                std::cout << "fs ";
-                break;
-              case '1':
-                print_combo();
-                std::cout << "s1   ";
-                break;
-              case '2':
-                print_combo();
-                std::cout << "s2   ";
-                break;
-              case '3':
-                print_combo();
-                std::cout << "s3   ";
-                break;
-              default:
-                assert(0);
-            }
+            combo_count = 0;
           }
-          print_combo();
-        } else {
-          std::cout << best_seq << " ";
-        }
+        };
+        std::cout << best_sequence[best_index];
         std::cout << "=> " << best << " dmg in " << f << " frames\n";
         last_best = best;
       }
