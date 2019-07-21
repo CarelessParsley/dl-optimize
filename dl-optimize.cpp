@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <utility>
+#include <cassert>
 
 namespace std {
   template<typename T>
@@ -28,8 +29,8 @@ namespace std {
 // Erik
 constexpr double STRENGTH = 2980.56;
 
-constexpr int NUM_SKILLS = 3;
-constexpr bool reduce_states = true;
+constexpr int NUM_SKILLS = 2;
+constexpr bool reduce_states = false;
 
 constexpr int SKILL_SP[3] = {2868, 5883, 4711};
 constexpr int SKILL_STARTUP = 6;
@@ -595,9 +596,9 @@ int main(int argc, char** argv) {
           int combo_count = 0;
           auto print_combo = [&](bool trailing_space = true) {
             if (combo_count) {
-              std::cerr << "c" << combo_count;
+              std::cout << "c" << combo_count;
               if (trailing_space) {
-                std::cerr << " ";
+                std::cout << " ";
               }
               combo_count = 0;
             }
@@ -612,19 +613,19 @@ int main(int argc, char** argv) {
                 break;
               case 'f':
                 print_combo(/*trailing_space*/ false);
-                std::cerr << "fs ";
+                std::cout << "fs ";
                 break;
               case '1':
                 print_combo();
-                std::cerr << "s1   ";
+                std::cout << "s1   ";
                 break;
               case '2':
                 print_combo();
-                std::cerr << "s2   ";
+                std::cout << "s2   ";
                 break;
               case '3':
                 print_combo();
-                std::cerr << "s3   ";
+                std::cout << "s3   ";
                 break;
               default:
                 assert(0);
@@ -632,9 +633,9 @@ int main(int argc, char** argv) {
           }
           print_combo();
         } else {
-          std::cerr << best_seq << " ";
+          std::cout << best_seq << " ";
         }
-        std::cerr << "=> " << best << " dmg in " << f << " frames\n";
+        std::cout << "=> " << best << " dmg in " << f << " frames\n";
         last_best = best;
       }
     }
