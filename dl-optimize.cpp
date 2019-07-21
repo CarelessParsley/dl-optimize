@@ -286,6 +286,7 @@ struct ActionString {
               set(loc - 1, i2f(f2i(p_c) + 2));
               return;
           }
+          break;
         case 'f':
           switch (p_c) {
             case ActionFragment::C1:
@@ -296,6 +297,7 @@ struct ActionString {
               set(loc - 1, i2f(f2i(p_c) + 1));
               return;
           }
+          break;
       }
     }
     ActionFragment c;
@@ -826,8 +828,8 @@ int main(int argc, char** argv) {
   //  - Get some C++ library and build with it
   for (int f = 1; f < frames; f++) {
     auto cur_time = std::chrono::high_resolution_clock::now();
-    if (cur_time > last_print_time + 1 * std::chrono::seconds(1)) {
-      std::cerr << "fps: " << (f * std::chrono::seconds(1)) / (cur_time - start_time) << "\n";
+    if (cur_time > last_print_time + 1 * std::chrono::seconds(60)) {
+      std::cerr << "fpm: " << (f * std::chrono::minutes(1)) / (cur_time - start_time) << "\n";
       last_print_time = cur_time;
     }
     for (int s = 0; s < num_states; s++) {
