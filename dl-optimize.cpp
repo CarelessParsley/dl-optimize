@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <utility>
 #include <cassert>
+#include <chrono>
 
 namespace std {
   template<typename T>
@@ -735,6 +736,9 @@ int main(int argc, char** argv) {
 
   best_dps[dix(0, initial_state)] = 0;
 
+  auto start_time = std::chrono::high_resolution_clock::now();
+  auto last_print_time = start_time;
+
   float last_best = 0;
   // Correctness improvements
   //   - We currently pick an arbitrary combo among all transpositions
@@ -765,21 +769,18 @@ int main(int argc, char** argv) {
   //        randomize which way we round to to avoid problem?)
   //      - This does't help too much: we spend most of our space
   //        storing combo strings
-  //    - Delta coding!  Say what the added character is, and where we
-  //      came from (4 bytes + 1 byte for character).  But... need to store
-  //      full value when frame truncates.  Full backwards state would take 36G.
-  //      BUT we could store this on disk as we would never need to
-  //      access until we want to actually reconstruct strings for the
-  //      optimal path.
-  //    - "Early error": we'd like to report OOM before we spend a lot
-  //      of time doing computation
+  //    - [DONE] Previously action strings were dynamically allocated
+  //      but now they are all allocated ahead of time, so you'll OOM
+  //      immediately when we make the table
   //  - More state reduction?
-  //    - Unsound approximations
+  //    - Unsound approximations; e.g., quantize buff / SP time
   //  - Branch bound (we KNOW that this is provably worse,
   //    prune it)
   //    - Same combo, same buff, dps is less, SP is less
   //    - Best case "catch up" for states
-  //  - Improve locality of access?
+  //    - Problem: How to know you've been dominated?  Not so easy
+  //      to tell without more scanning.
+  //  - [TODO] Improve locality of access?
   //    - Only five actions: bucket them together
   //    - Lay out action_inverses contiguously, so we don't
   //      thrash cache
@@ -800,6 +801,11 @@ int main(int argc, char** argv) {
   //
   //  - Get some C++ library and build with it
   for (int f = 1; f < frames; f++) {
+    auto cur_time = std::chrono::high_resolution_clock::now();
+    if (cur_time > last_print_time + 1 * std::chrono::seconds(1)) {
+      std::cerr << "fps: " << (f * std::chrono::seconds(1)) / (cur_time - start_time) << "\n";
+      last_print_time = cur_time;
+    }
     for (int s = 0; s < num_states; s++) {
       AdvState st;
       st.c = ix2state[s];
@@ -852,10 +858,11 @@ int main(int argc, char** argv) {
               cur_seq = best_sequence[z];
               cur_seq.push(ac);
             } else if (tmp >= 0 && tmp > cur - EPSILON) {
-               // TODO: reimplement this
               ActionString tmp_seq = best_sequence[z];
               tmp_seq.push(ac);
-              if (std::lexicographical_compare(cur_seq.buffer_.begin(), cur_seq.buffer_.end(), tmp_seq.buffer_.begin(), tmp_seq.buffer_.end())) {
+              if (std::lexicographical_compare(
+                    cur_seq.buffer_.begin(), cur_seq.buffer_.end(),
+                    tmp_seq.buffer_.begin(), tmp_seq.buffer_.end())) {
                 cur = tmp;
                 cur_seq = std::move(tmp_seq);
               }
@@ -880,15 +887,6 @@ int main(int argc, char** argv) {
     if (best >= 0) {
       if (best >= 0 && best > last_best + EPSILON) {
         int combo_count = 0;
-        auto print_combo = [&](bool trailing_space = true) {
-          if (combo_count) {
-            std::cout << "c" << combo_count;
-            if (trailing_space) {
-              std::cout << " ";
-            }
-            combo_count = 0;
-          }
-        };
         std::cout << best_sequence[best_index];
         std::cout << "=> " << best << " dmg in " << f << " frames\n";
         last_best = best;
