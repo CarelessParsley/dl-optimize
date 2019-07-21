@@ -29,6 +29,8 @@ namespace std {
 // Erik
 constexpr double STRENGTH = 2980.56;
 
+constexpr double EPSILON = 0.01;
+
 constexpr int NUM_SKILLS = 2;
 constexpr bool reduce_states = false;
 
@@ -150,6 +152,7 @@ constexpr AdvState INIT_ST = { .s =
 // 'x' = basic combo
 // '1' = S1
 // '2' = S2
+// '3' - S3
 using ActionCode = char;
 
 // Map from AdvState k to AdvStates which, when taking ActionCode, result
@@ -482,7 +485,10 @@ int main(int argc, char** argv) {
 
   std::cerr << "max frame window = " << max_frames << "\n";
 
-  std::vector<double> best_dps(max_frames * num_states, -1);
+  int buffer_size = max_frames * num_states;
+  std::cerr << "projected memory usage = " << (buffer_size * sizeof(float)) / (1 << 20) << " MB\n";
+
+  std::vector<float> best_dps(buffer_size, -1);
   std::vector<std::string> best_sequence(max_frames * num_states);
 
   auto dix = [&](int frame, int state_ix) {
@@ -491,10 +497,44 @@ int main(int argc, char** argv) {
 
   best_dps[dix(0, initial_state)] = 0;
 
-  double last_best = 0;
+  float last_best = 0;
+  // Correctness improvements
+  //   - We currently pick an arbitrary combo among all transpositions
+  //     but it would be better if we did some sort of "greedy" pick
+  //     where we preferentially kept combo sequences which were
+  //     closer to the greedy rotation  Or at the very least, pick
+  //     some deterministic combo sequence.
+  //     - Can we assign a number and use this to pick winners?
+  //       But how to keep the number up to date?
+  //     - Dumb solution: do a lexicographic compare on strings
+  //       (ew, that'll make it slower)
+
+
   // This is the bottleneck!
   //  - Snapshotting (so I can continue computing later)
-  //  - Double => Float
+  //  - Reduce memory usage
+  //    - [DONE] Double => Float
+  //    - Compress to 16-bit integer?  Would go up to 65535 damage;
+  //      for S1/S2 only this is just slightly over.  Quantize further?
+  //      For example, use worse prints.
+  //      - Many factors in the damage calculation don't matter, except
+  //        for determining rounding; e.g.,
+  //        strength and initial 5/3.  Could apply mod, with skill
+  //        and crit modifiers.
+  //            Compare 653 dmg from c1
+  //            Without other bits: 114 * (1 + 0.18 * 0.22)
+  //        Rounding errors could be severe, however!  (Maybe can
+  //        randomize which way we round to to avoid problem?)
+  //      - This does't help too much: we spend most of our space
+  //        storing combo strings
+  //    - Delta coding!  Say what the added character is, and where we
+  //      came from (4 bytes + 1 byte for character).  But... need to store
+  //      full value when frame truncates.  Full backwards state would take 36G.
+  //      BUT we could store this on disk as we would never need to
+  //      access until we want to actually reconstruct strings for the
+  //      optimal path.
+  //    - "Early error": we'd like to report OOM before we spend a lot
+  //      of time doing computation
   //  - More state reduction?
   //    - Unsound approximations
   //  - Branch bound (we KNOW that this is provably worse,
@@ -510,6 +550,36 @@ int main(int argc, char** argv) {
   //    - Bit pack
   //    - "Everything is roughly the same size, do the
   //      allocation inline"
+  //        - On S1/S2 only Erik, combo length is
+  //          something like frames/53+1 (this underestimates
+  //          is some cases).  After 60s you end up with
+  //          rotation length 67.
+  //
+  //          Action code currently has 5 elements x f s1 s2 s3
+  //          (irritatingly).  So 3-bit necessary (but probably 4-bit
+  //          easier to pack.)
+  //
+  //          We can do a variable length encoding, based on domain
+  //          specific knowledge.  Here are a number of fairly
+  //          likely substrings:
+  //
+  //            c1
+  //            c2
+  //            c3
+  //            c4
+  //            c5
+  //            c1fs
+  //            c2fs
+  //            c3fs
+  //            c4fs
+  //            c5fs
+  //            s1
+  //            s2
+  //            s3
+  //            fs
+  //
+  //          Can we guess what the compression factor here is?
+  //
   //  - Take advantage of sparsity
   //    - Early on, most states are not accessible.  Only
   //      at a certain load factor should we densify.
@@ -572,26 +642,41 @@ int main(int argc, char** argv) {
             dmg *= (1. + (0.04 + 0.14 /*KFM*/) * (0.7 + 0.15 /* FitF */ + (p_st.s.buff_frames_left_ > 0 ? 0.50 : 0))); // crit rate * crit damage
 
             auto tmp = best_dps[z] + dmg;
-            if (tmp >= 0 && tmp > cur) {
+            if (tmp >= 0 && tmp > cur + EPSILON) {
               // std::cerr << "f" << f << " " << ac << " ps" << p_st << " s" << st << " accepting " << tmp << " (" << dmg << ")\n";
               cur = tmp;
               cur_seq = best_sequence[z] + ac;
+            } else if (tmp >= 0 && tmp > cur - EPSILON) {
+              std::string tmp_seq = best_sequence[z] + ac;
+              // This compare is expensive but it greatly improves the
+              // quality of the combos we produce
+              if (std::lexicographical_compare(cur_seq.begin(), cur_seq.end(), tmp_seq.begin(), tmp_seq.end())) {
+                cur = tmp;
+                cur_seq = std::move(tmp_seq);
+              }
             }
           }
         }
       }
     }
-    double best = -1;
+    float best = -1;
     std::string best_seq = "";
+    int max_seq_len = 0;
+    int density = 0;
     for (int s = 0; s < num_states; s++) {
       auto tmp = best_dps[dix(f, s)];
-      if (tmp > best) {
+      if (tmp > best + EPSILON) {
         best = tmp;
         best_seq = best_sequence[dix(f, s)];
       }
+      if (tmp > 0) {
+        density++;
+        max_seq_len = std::max(max_seq_len, static_cast<int>(best_sequence[dix(f, s)].length()));
+      }
     }
+    // std::cerr << "" << f << ", " << max_seq_len << ", " << density << "\n";
     if (best >= 0) {
-      if (best >= 0 && best > last_best) {
+      if (best >= 0 && best > last_best + EPSILON) {
         if (1) {
           int combo_count = 0;
           auto print_combo = [&](bool trailing_space = true) {
