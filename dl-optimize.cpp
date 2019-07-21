@@ -32,7 +32,7 @@ constexpr double EPSILON = 0.01;
 
 // Configuration
 constexpr int NUM_SKILLS = 2; // How many skills to consider calculation for
-constexpr bool reduce_states = false; // Whether or not to apply state space reduction with Hopcroft
+constexpr bool reduce_states = true; // Whether or not to apply state space reduction with Hopcroft
 
 // Erik's stats
 constexpr double STRENGTH = 2980.56;
@@ -534,7 +534,7 @@ int main(int argc, char** argv) {
 
   auto states = compute_states();
 
-  std::cerr << "num_states = " << states.size() << "\n";
+  std::cerr << "num states = " << states.size() << "\n";
 
   std::vector<P> ps; // partitions
   std::vector<N> ns;
@@ -668,6 +668,12 @@ int main(int argc, char** argv) {
 
   int num_states;
   ComesFrom action_inverse;
+
+  // More efficient memory usage by avoiding padding.
+  std::vector<AdvState> packed_inverse_state;
+  std::vector<ActionCode> packed_inverse_code;
+  std::vector<int> inverse_index;  // map of AdvStateId to where it lives in the pack
+
   PId initial_state;
   if (reduce_states) {
     ix2state.resize(ps.size());
@@ -686,12 +692,31 @@ int main(int argc, char** argv) {
         action_inverse_set[ns[c2n[s.first]].pid_].insert({AdvState{.c = ix2state[p]}, ac});
       }
     }
-    // dumb
+    // Compute size of pack
+    int packed_size = 0;
     for (const auto& kv : action_inverse_set) {
-      action_inverse[kv.first] = std::vector<std::pair<AdvState, char>>(kv.second.begin(), kv.second.end());
+      packed_size += kv.second.size();
     }
+
+    packed_inverse_state.reserve(packed_size);
+    packed_inverse_code.reserve(packed_size);
+    inverse_index.reserve(ps.size() + 1); // so we can "off by one"
+
+    int packed_i = 0;
+    for (int p = 0; p < ps.size(); p++) {
+      inverse_index.emplace_back(packed_i);
+      for (const auto& st_ac : action_inverse_set[p]) {
+        packed_inverse_state.emplace_back(st_ac.first);
+        packed_inverse_code.emplace_back(st_ac.second);
+        packed_i++;
+      }
+    }
+    assert(packed_i == packed_size);
+    inverse_index.emplace_back(packed_i);
+
     initial_state = ns[c2n[INIT_ST.c]].pid_;
   } else {
+    // TODO: fix me
     ix2state.reserve(states.size());
     for (auto s : states) {
       PId p = ix2state.size();
@@ -706,16 +731,15 @@ int main(int argc, char** argv) {
   ps.clear();
   ns.clear();
 
-  std::cerr << "final num states = " << num_states << "\n";
+  action_inverse.clear();
 
   // Compute necessary frame window
   int max_frames = 1;
-  for (int s = 0; s < num_states; s++) {
-    for (auto pair : action_inverse[s]) {
-      AdvState p_st;
-      ActionCode ac;
-      std::tie(p_st, ac) = pair;
-      int frames = compute_frames(p_st, ac, AdvState{ .c = ix2state[s] });
+  for (int p = 0; p < num_states; p++) {
+    for (int j = inverse_index[p]; j < inverse_index[p+1]; j++) {
+      AdvState p_st = packed_inverse_state[j];
+      ActionCode ac = packed_inverse_code[j];
+      int frames = compute_frames(p_st, ac, AdvState{ .c = ix2state[p] });
       if (frames > max_frames) {
         max_frames = frames + 1;
       }
@@ -813,10 +837,9 @@ int main(int argc, char** argv) {
       auto& cur_seq = best_sequence[dix(f, s)];
 
       // Consider all states which could have lead here
-      for (auto pair : action_inverse[s]) {
-        AdvState p_st;
-        ActionCode ac;
-        std::tie(p_st, ac) = pair;
+      for (int j = inverse_index[s]; j < inverse_index[s+1]; j++) {
+        AdvState p_st = packed_inverse_state[j];
+        ActionCode ac = packed_inverse_code[j];
 
         int frames = compute_frames(p_st, ac, st);
 
