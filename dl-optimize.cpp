@@ -26,24 +26,22 @@ namespace std {
   };
 }
 
-// Erik
-constexpr double STRENGTH = 2980.56;
-
+// Absolute tolerance when comparing DPS floating point for equality.
 constexpr double EPSILON = 0.01;
 
-constexpr int NUM_SKILLS = 2;
-constexpr bool reduce_states = false;
+// Configuration
+constexpr int NUM_SKILLS = 2; // How many skills to consider calculation for
+constexpr bool reduce_states = false; // Whether or not to apply state space reduction with Hopcroft
+
+// Erik's stats
+constexpr double STRENGTH = 2980.56;
 
 constexpr int SKILL_SP[3] = {2868, 5883, 4711};
 constexpr int SKILL_STARTUP = 6;
 constexpr int SKILL_RECOVERY[3] = {111, 114, 54};
 constexpr int SKILL_MOD[3] = {1036, 933, 0};
 
-// UI gets hidden this long when you skill; you can't
-// queue another skill until you wait for the UI to come back
-constexpr int UI_RECOVERY = 114;
-
-// Axe
+// Axe's stats
 constexpr int COMBO_SP[5] = {200, 240, 360, 380, 420};
 constexpr int COMBO_STARTUP = 16;
 constexpr int COMBO_RECOVERY[5] = {46, 61, 40, 78, 19};
@@ -56,22 +54,23 @@ constexpr int FS_RECOVERY = 34;
 
 constexpr int XFS_STARTUP[5] = {68, 62, 65, 67, 40};
 
+// UI gets hidden this long when you skill; you can't
+// queue another skill until you wait for the UI to come back
+constexpr int UI_RECOVERY = 114;
+
 // Not the combo counter, but your location in a standard C5 combo.  We
 // use this to figure out what startup/recovery frames are relevant.
+// Here's the state machine (implemented by next_combo_basic), where x
+// is a basic.
 //
-// Combo values:
-// -1 0 1 2 3 4       99 (FS)
-//   x x x x x x
-//     \-------/
-//     \--------------/
+// AFTER_FS  --x--V
+// AFTER_S$N --x--V
+// NO_COMBO -x-> AFTER_C1 -x-> ... -x-> AFTER_C5
+//                  ^-----------x-----------/
 //
-// NB: -1 means you didn't come out of a combo; 4 means
-// you just finished a c5.  You cycle then to state 0.
-// State -1 happens when you skill.
-//
-// 99 means you did an FS.  Importantly, 99 % 5 == 4,
-// so this also wraps around to zero so we can conveniently
-// implement next_combo_state.
+// I used to play the trick where all of the leading to C1 states
+// were 4 mod 5, but there's not enough space in an 8-bit integer
+// to represent all of them this way.
 enum ComboState : int8_t {
   AFTER_S1 = -4,
   AFTER_S2 = -3,
@@ -85,6 +84,7 @@ enum ComboState : int8_t {
   AFTER_FS = 5,
 };
 
+// After doing another basic, what is your new combo state?
 ComboState next_combo_state(ComboState combo) {
   switch (combo) {
     case AFTER_S1:
@@ -105,15 +105,14 @@ ComboState next_combo_state(ComboState combo) {
       return AFTER_C1;
     default:
       assert(false);
-      /*
-    default:
-      return static_cast<ComboState>((combo + 1) % 5);
-      */
   }
 }
 
-// This is UB but I don't care
+// TODO: Do this a more standard complaint way (lol)
 using AdvStateCode = uint64_t;
+
+// Description of the "state" of an adventurer.  Currently
+// hardcoded to support a single buff.
 union AdvState {
   struct {
     int16_t sp_[3];
@@ -127,7 +126,6 @@ bool operator==(AdvState a, AdvState b) {
   return a.c == b.c;
 }
 
-
 namespace std {
   template <>
   struct hash<AdvState> {
@@ -138,16 +136,18 @@ namespace std {
   };
 }
 
-static_assert(sizeof(AdvState) == sizeof(AdvStateCode), "AdvState packs");
+static_assert(sizeof(AdvState) == sizeof(AdvStateCode), "AdvState packs into a 64-bit integer");
 
 std::ostream& operator<<(std::ostream& os, AdvState st) {
   os << "[sp=" << st.s.sp_[0] << "," << st.s.sp_[1] << ";c=" << (int)st.s.combo_ << ";b=" << st.s.buff_frames_left_ << "]";
   return os;
 }
 
+// Initial state at the start of the sim.
 constexpr AdvState INIT_ST = { .s =
   { .sp_ = {0, 0, 0}, .combo_ = NO_COMBO, .buff_frames_left_ = 0 } };
 
+// A single action you can take as the character
 // 'f' = force strike
 // 'x' = basic combo
 // '1' = S1
@@ -155,58 +155,23 @@ constexpr AdvState INIT_ST = { .s =
 // '3' - S3
 using ActionCode = char;
 
-// Fixed size encoding of action strings.  Supports "compressed" action
-// string of size up to 32, in 16 bytes of space.  "Null" terminated.
-
-// Implementation notes:
-//  - Implement best sequence in a less shitty way
-//    - Bit pack
-//    - "Everything is roughly the same size, do the
-//      allocation inline"
-//        - On S1/S2 only Erik, combo length is
-//          something like frames/53+1 (this underestimates
-//          is some cases).  After 60s you end up with
-//          rotation length 67.
+// Design notes:
 //
-//          Action code currently has 5 elements x f s1 s2 s3
-//          (irritatingly).  So 3-bit necessary (but probably 4-bit
-//          easier to pack.)
+// Originally, I stored individual actions (e.g., ActionCode) in a
+// string.  In this
+// setting, on S1/S2 only Erik, combo length is something like
+// frames/53+1 (this underestimates is some cases).  After 60s you end
+// up with rotation length 67.
 //
-//          We can do a variable length encoding, based on domain
-//          specific knowledge.  Here are a number of fairly
-//          likely substrings:
+// However, action code currently has 5 elements (x f s1 s2 s3),
+// which means you can't actually fit it in two bits.  So instead we
+// opted for a variable length code that uses 4-bits, but can encode
+// runs of basic combo up to five.
 //
-//            c1
-//            c2
-//            c3
-//            c4
-//            c5
-//            c1fs
-//            c2fs
-//            c3fs
-//            c4fs
-//            c5fs
-//            s1
-//            s2
-//            s3
-//            fs
-//
-//          Can we guess what the compression factor here is?
-//
-//          Empirically, 60 frames max size is 25.  So 32 4-bit
-//          characters: 16 bytes.
-//
-//          This is like 9G for Erik with S3.
-//        - Let's arbitrarily decide maximum length is 64.  Idea:
-//          if you OOM, you'll have a snapshot you can restart
-//          from (this means that snapshots need to be resizable)?
-//          Or just, no one actually cares about 60s; just go as
-//          far as you can get.
-//
-// FORMAT:
-//  low bits are index 0
-//  high bits are index 1
-//
+// Empirically, encoding 60 frames of actions requires only 25
+// in the variable length coding.  This is how we chose 16 bytes
+// (32 codes).  This also satisfies our memory budget: we use
+// 9G to compute Erik with S3.
 
 // Order of this class matters!  It determines what the "preferred"
 // action at any given point in time is (bottom is "most preferred")
@@ -216,7 +181,11 @@ using ActionCode = char;
 enum class ActionFragment : uint8_t { // actually only four bit
   NIL = 0,
   FS,
-  // NB: We rely on C1-C5/C1FS-C5FS being interleaved in this way
+  // NB: We rely on C1-C5/C1FS-C5FS being interleaved in this way.
+  // You can reorder them but then you need to edit ActionString::pack()
+  // to handle it correctly.  I think C5 should be preferred over C4FS
+  // which is why I interleaved, but that's something that's up to
+  // taste.
   C1,
   C1FS,
   C2,
@@ -233,6 +202,8 @@ enum class ActionFragment : uint8_t { // actually only four bit
   // 15 (one free slot)
 };
 
+// Fixed size encoding of action strings.  Supports "compressed" action
+// string of size up to 32, in 16 bytes of space.  NIL terminated.
 struct ActionString {
   std::array<uint8_t, 16> buffer_ = {};
   static ActionFragment i2f(uint8_t c) {
@@ -262,15 +233,22 @@ struct ActionString {
     }
     return -1;
   }
+  // Get the ith action fragment in an action string.  Valid to read
+  // beyond the end of the action string, but not beyond the internal
+  // buffer.  In practice this means we can only actually store
+  // strings of size 31 (since we don't have any out-of-bounds
+  // checking).
   ActionFragment get(int i) const {
     uint8_t c = buffer_[i / 2];
     return _unpack(c, i % 2);
   }
-  // Assignment not supported.  vector<bool>, rest in peace!
+  // Assignment to af[i] not supported.  vector<bool>, rest in peace!
   ActionFragment operator[](int i) const {
     return get(i);
   }
+  // Set the ith action fragment in an action string.
   void set(int i, ActionFragment f) {
+    assert(i < 32);
     uint8_t c = buffer_[i / 2];
     ActionFragment first = _unpack(c, 0);
     ActionFragment second = _unpack(c, 1);
@@ -281,6 +259,8 @@ struct ActionString {
     }
     buffer_[i / 2] = _pack(first, second);
   }
+  // Push an action code to an action string.  The code will
+  // be coalesced with the latest action fragment if possible.
   void push(ActionCode ac) {
     int loc = -1;
     for (int i = 0; i < 16; i++) {
@@ -401,6 +381,9 @@ std::ostream& operator<<(std::ostream& os, const ActionString& as) {
 // in k
 using ComesFrom = std::unordered_map<AdvStateCode, std::vector<std::pair<AdvState, ActionCode>>>;
 
+// Compute the number of frames it takes to recover from the previous
+// action (as per ComboState).  This doesn't account for actions which
+// cancel the recovery.
 int _handle_recovery(ComboState c, bool combo_recovery) {
   switch (c) {
     case AFTER_FS:
@@ -421,6 +404,9 @@ int _handle_recovery(ComboState c, bool combo_recovery) {
   }
 }
 
+// Compute the number of frames it takes to get from p_st to st,
+// performing action ac.  Recovery frames after ac are not included
+// (they will be accounted for when we process actions from st.)
 int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
   int frames = 0;
   if (ac == 'x') {
@@ -464,7 +450,10 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
   return frames;
 }
 
-
+// Compute the entire set of reachable AdvStates from the initial sim
+// state.  Returns a map from reachable AdvState, to the (state, action)
+// pairs which could lead to it (the inverse of the transition
+// function.)
 ComesFrom compute_states() {
   ComesFrom comes_from;
   std::vector<AdvState> todo{INIT_ST};
@@ -524,6 +513,8 @@ ComesFrom compute_states() {
 using AdvStateId = int;
 using PartitionId = int;
 
+// Auxiliary definitions for Hopcroft
+
 using NId = int;
 using PId = int;
 
@@ -531,6 +522,9 @@ struct P { std::unordered_set<NId> nids_; };
 struct N { PId pid_; AdvStateCode st_; };
 
 int main(int argc, char** argv) {
+
+  // Make IO faster
+  std::ios_base::sync_with_stdio(false);
 
   int frames;
   std::cerr << "frames? ";
@@ -601,6 +595,8 @@ int main(int argc, char** argv) {
         waiting.insert({p, ac});
       }
     }
+
+    // Do Hopcroft's algorithm (in a shitty inefficient way)
 
     // while WAITING not empty do
     while (waiting.size()) {
