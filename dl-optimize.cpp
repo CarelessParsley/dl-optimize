@@ -80,10 +80,19 @@ constexpr int UI_RECOVERY = 114;
 // were 4 mod 5, but there's not enough space in an 8-bit integer
 // to represent all of them this way.
 enum ComboState : int8_t {
+  // This one is a bit special.  On axe, a single C1 isn't
+  // quite sufficient to cover up for UI lag on S3 (after
+  // triggering S3, you have skill startup (15) + skill
+  // recovery (54) + combo startup (16) < ui recovery (114).
+  // So you STILL have to wait in that situation.  S1 and S2
+  // don't have this problem because they have much longer
+  // skill animations.
+  AFTER_S3C1 = -5,
   AFTER_S1 = -4,
   AFTER_S2 = -3,
   AFTER_S3 = -2,
   NO_COMBO = -1,
+  // We rely on AFTER_C1 being contiguously numbered from zero
   AFTER_C1 = 0,
   AFTER_C2 = 1,
   AFTER_C3 = 2,
@@ -97,10 +106,12 @@ ComboState next_combo_state(ComboState combo) {
   switch (combo) {
     case AFTER_S1:
     case AFTER_S2:
-    case AFTER_S3:
     case AFTER_FS:
     case NO_COMBO:
       return AFTER_C1;
+    case AFTER_S3:
+      return AFTER_S3C1;
+    case AFTER_S3C1:
     case AFTER_C1:
       return AFTER_C2;
     case AFTER_C2:
@@ -406,6 +417,11 @@ int _handle_recovery(ComboState c, bool combo_recovery) {
       return SKILL_RECOVERY[2];
     case NO_COMBO:
       return 0;
+    case AFTER_S3C1:
+      if (combo_recovery) {
+          return COMBO_RECOVERY[0];
+      }
+      return 0;
     default:
       if (combo_recovery) {
         return COMBO_RECOVERY[c];
@@ -421,7 +437,7 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
   int frames = 0;
   if (ac == 'x') {
     frames += _handle_recovery(static_cast<ComboState>(p_st.s.combo_), /*combo_recovery*/ true);
-    if (st.s.combo_ == AFTER_C1) {
+    if (st.s.combo_ == AFTER_C1 || st.s.combo_ == AFTER_S3C1) {
       frames += COMBO_STARTUP;
     }
   } else if (ac == 'f') {
@@ -436,6 +452,9 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
       case AFTER_FS:
         frames += FS_STARTUP;
         break;
+      case AFTER_S3C1:
+        frames += XFS_STARTUP[0];
+        break;
       default:
         frames += XFS_STARTUP[p_st.s.combo_];
         break;
@@ -448,9 +467,22 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
       case AFTER_S1:
       case AFTER_S2:
       case AFTER_S3:
+      {
         int i = p_st.s.combo_ - AFTER_S1;
+        // NB: We already 'paid' for UI recovery with the startup
+        // cost of the skill.
         frames += std::max(SKILL_RECOVERY[i], UI_RECOVERY - SKILL_STARTUP[i]);
         break;
+      }
+      case AFTER_S3C1:
+      {
+        // Cancel the C1 recovery, but pay for any left over UI recovery
+        int f = UI_RECOVERY - SKILL_STARTUP[2] - SKILL_RECOVERY[2] - COMBO_STARTUP;
+        // If this assert fails, you don't need this state
+        assert(f > 0);
+        frames += f;
+        break;
+      }
     }
     frames += SKILL_STARTUP[st.s.combo_ - AFTER_S1];
   }
