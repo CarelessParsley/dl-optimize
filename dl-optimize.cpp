@@ -513,13 +513,10 @@ ComesFrom compute_states() {
   return comes_from;
 }
 
-using AdvStateId = int;
-using PartitionId = int;
-
 // Auxiliary definitions for Hopcroft
 
-using NId = int;
-using PId = int;
+using NId = int;  // sequential numbering of non-reduced AdvStates
+using PId = int;  // sequential numbering of AdvState partitions (aka equivalence classes)
 
 struct P { std::unordered_set<NId> nids_; };
 struct N { PId pid_; AdvStateCode st_; };
@@ -534,210 +531,215 @@ int main(int argc, char** argv) {
   std::cin >> frames;
   std::cerr << frames << "\n";
 
-  auto states = compute_states();
+  // In the end, every AdvState will get mapped to an integer
+  // in some contiguous sequence of integers.
+  std::unordered_map<AdvStateCode, PId> state2ix;
+  // This mapping provides a "representative" AdvState for
+  // the index; the AdvState here is not unique.
+  std::vector<AdvStateCode> ix2state;
 
-  std::cerr << "num states = " << states.size() << "\n";
+  // A representation of the "inverse" transition function:
+  // given a state (indexed by PId), compute all states which
+  // lead to it (and by what action they came.)  We store this
+  // in a packed representation to improve locality.
+  //
+  // packed_inverse_* = A1 A2 A3 B1 B2 C1 C2 C3
+  // inverse_index    = 0        3     5        8
+  //
+  // We store these as two separate vectors so packed_inverse_code
+  // can avoid padding (it's a char.)
+  std::vector<AdvState> packed_inverse_state;
+  std::vector<ActionCode> packed_inverse_code;
+  std::vector<int> inverse_index;  // map of PId to where it lives in the pack
 
-  std::vector<P> ps; // partitions
-  std::vector<N> ns;
-  std::unordered_map<AdvStateCode, NId> c2n;
+  // The index which identifies the initial state.  We don't know what
+  // this is until we assign partitions to states.
+  PId initial_state;
 
-  if (reduce_states) {
-    // We need to setup some auxiliary structs.  First,
-    // we need to construct an initial partition of adventurer
-    // states.  This is done by mapping every adventurer
-    // state to a "coarse" state, a canonical state that
-    // buckets together every state that could co-exist.
+  {
+    std::vector<P> ps; // partition metadata
+    std::vector<N> ns; // node metadata
+    // Mapping of AdvState to their node ID.  This is analgoous
+    // to state2ix, but this is prior to bucketing all AdvStateCodes
+    // into equivalence partitions.
+    std::unordered_map<AdvStateCode, NId> c2n;
 
-    auto coarsen = [](AdvStateCode st) {
-      AdvState c_st;
-      c_st.c = st;
-      c_st.s.sp_[0] = 0;
-      c_st.s.sp_[1] = 0;
-      c_st.s.sp_[2] = 0;
-      c_st.s.buff_frames_left_ = c_st.s.buff_frames_left_ > 0 ? 1 : 0;
-      return c_st.c;
-    };
+    auto states = compute_states();
 
-    // This mapping gives us our initial partitioning.
+    std::cerr << "initial states = " << states.size() << "\n";
 
+    // Reduce states
     {
-      std::unordered_map<AdvStateCode, PId> coarse2p;
-      for (const auto& kv : states) {
-        AdvStateCode c = kv.first;
-        AdvStateCode coarse = coarsen(c);
-        NId n = ns.size();
-        ns.emplace_back();
-        auto it = coarse2p.find(coarse);
-        PId p;
-        if (it == coarse2p.end()) {
-          p = ps.size();
-          ps.emplace_back();
-          coarse2p.insert({coarse, p});
-        } else {
-          p = it->second;
-        }
-        ns[n].pid_ = p;
-        ns[n].st_ = c;
-        ps[p].nids_.insert(n);
-        c2n[c] = n;
-        AdvState st;
-        st.c = c;
-      }
-    }
+      // First, we need to construct an initial partition of adventurer
+      // states that are definitely distinct.  This is done by mapping
+      // every adventurer state to a "coarse" state, a canonical state
+      // that buckets together every state that could co-exist.
 
-    std::cerr << "minimum states = " << ps.size() << "\n";
+      auto coarsen = [](AdvStateCode st) {
+        AdvState c_st;
+        c_st.c = st;
+        c_st.s.sp_[0] = 0;
+        c_st.s.sp_[1] = 0;
+        c_st.s.sp_[2] = 0;
+        c_st.s.buff_frames_left_ = c_st.s.buff_frames_left_ > 0 ? 1 : 0;
+        return c_st.c;
+      };
 
-    for (PId p = 0; p < ps.size(); p++) {
-      std::cerr << p << " has " << ps[p].nids_.size() << " states like " << AdvState{.c = coarsen(ns[*ps[p].nids_.begin()].st_)} << "\n";
-    }
-
-    std::unordered_set<std::pair<PId, ActionCode>> waiting;
-    for (PId p = 0; p < ps.size(); p++) {
-      for (auto ac : {'x', 'f', '1', '2', '3'}) {
-        waiting.insert({p, ac});
-      }
-    }
-
-    // Do Hopcroft's algorithm (in a shitty inefficient way)
-
-    // while WAITING not empty do
-    while (waiting.size()) {
-      // select and delete any integer i from WAITING
-      PId p;
-      ActionCode ac;
-      std::tie(p, ac) = *waiting.begin();
-      waiting.erase({p, ac});
-
-      // INVERSE <- f^-1(B[i])
-      std::unordered_set<NId> inverse;
-      for (NId n : ps[p].nids_) {
-        for (const auto& kv : states[ns[n].st_]) {
-          if (kv.second != ac) continue;
-          inverse.insert(c2n[kv.first.c]);
-        }
-      }
-
-      // for each j such that B[j] /\ INVERSE != {} and
-      // B[j] not subset of INVERSE (this list of j is
-      // stored in jlist)
-      std::unordered_map<PId, std::vector<NId>> jlist;
-      for (NId n : inverse) {
-        PId q = ns[n].pid_;
-        jlist[q].emplace_back(n);
-        if (jlist[q].size() == ps[q].nids_.size()) {
-          jlist.erase(q);
-        }
-      }
-      for (auto q_qns : jlist) {
-        // q <- q+ 1
-        // create a new block B[q]
-        PId r = ps.size();
-        ps.emplace_back();
-        PId q = q_qns.first;
-        const auto& qns = q_qns.second;
-        // B[q] <- B[j] /\ INVERSE
-        ps[r].nids_.insert(qns.begin(), qns.end());
-        // B[j] <- B[j] - B[q]
-        for (NId n : qns) {
-          ns[n].pid_ = r;
-          ps[q].nids_.erase(n);
-        }
-        // if j is in WAITING, then add q to WAITING
-        for (auto ac : {'x', 'f', '1', '2', '3'}) {
-          if (waiting.count({q, ac})) {
-            waiting.insert({r, ac});
+      // Initializes ps, ns, c2n
+      {
+        // Mapping of *coarsened* AdvState to the relevant partition.
+        std::unordered_map<AdvStateCode, PId> coarse2p;
+        for (const auto& kv : states) {
+          AdvStateCode c = kv.first;
+          AdvStateCode coarse = coarsen(c);
+          NId n = ns.size();
+          ns.emplace_back();
+          auto it = coarse2p.find(coarse);
+          PId p;
+          if (it == coarse2p.end()) {
+            p = ps.size();
+            ps.emplace_back();
+            coarse2p.insert({coarse, p});
           } else {
-            // if |B[j]| <= |B[q]| then
-            //  add j to WAITING
-            // else add q to WAITING
-            if (ps[r].nids_.size() <= ps[q].nids_.size()) {
+            p = it->second;
+          }
+          ns[n].pid_ = p;
+          ns[n].st_ = c;
+          ps[p].nids_.insert(n);
+          c2n[c] = n;
+        }
+      }
+
+      std::cerr << "initial partition count = " << ps.size() << "\n";
+
+      for (PId p = 0; p < ps.size(); p++) {
+        std::cerr << p << " has " << ps[p].nids_.size() << " states like "
+          << AdvState{.c = coarsen(ns[*ps[p].nids_.begin()].st_)} << "\n";
+      }
+
+      // Do Hopcroft's algorithm (with shitty data structures)
+
+      std::unordered_set<std::pair<PId, ActionCode>> waiting;
+      for (PId p = 0; p < ps.size(); p++) {
+        for (auto ac : {'x', 'f', '1', '2', '3'}) {
+          waiting.insert({p, ac});
+        }
+      }
+
+      // while WAITING not empty do
+      while (waiting.size()) {
+        // select and delete any integer i from WAITING
+        PId p;
+        ActionCode ac;
+        std::tie(p, ac) = *waiting.begin();
+        waiting.erase({p, ac});
+
+        // INVERSE <- f^-1(B[i])
+        std::unordered_set<NId> inverse;
+        for (NId n : ps[p].nids_) {
+          for (const auto& kv : states[ns[n].st_]) {
+            if (kv.second != ac) continue;
+            inverse.insert(c2n[kv.first.c]);
+          }
+        }
+
+        // for each j such that B[j] /\ INVERSE != {} and
+        // B[j] not subset of INVERSE (this list of j is
+        // stored in jlist)
+        std::unordered_map<PId, std::vector<NId>> jlist;
+        for (NId n : inverse) {
+          PId q = ns[n].pid_;
+          jlist[q].emplace_back(n);
+          if (jlist[q].size() == ps[q].nids_.size()) {
+            jlist.erase(q);
+          }
+        }
+        for (auto q_qns : jlist) {
+          // q <- q+ 1
+          // create a new block B[q]
+          PId r = ps.size();
+          ps.emplace_back();
+          PId q = q_qns.first;
+          const auto& qns = q_qns.second;
+          // B[q] <- B[j] /\ INVERSE
+          ps[r].nids_.insert(qns.begin(), qns.end());
+          // B[j] <- B[j] - B[q]
+          for (NId n : qns) {
+            ns[n].pid_ = r;
+            ps[q].nids_.erase(n);
+          }
+          // if j is in WAITING, then add q to WAITING
+          for (auto ac : {'x', 'f', '1', '2', '3'}) {
+            if (waiting.count({q, ac})) {
               waiting.insert({r, ac});
             } else {
-              waiting.insert({q, ac});
+              // if |B[j]| <= |B[q]| then
+              //  add j to WAITING
+              // else add q to WAITING
+              if (ps[r].nids_.size() <= ps[q].nids_.size()) {
+                waiting.insert({r, ac});
+              } else {
+                waiting.insert({q, ac});
+              }
             }
           }
         }
       }
+      std::cerr << "reduced states = " << ps.size() << "\n";
     }
-    std::cerr << "reduced states = " << ps.size() << "\n";
-  }
 
-  // We want to make a table of the states, so assign them a contiguous
-  // numbering
-  std::unordered_map<AdvStateCode, AdvStateId> state2ix;
-  std::vector<AdvStateCode> ix2state;
+    // At this point, every node is associated with a partition;
+    // this is stored in ns.
 
-  int num_states;
-  ComesFrom action_inverse;
-
-  // More efficient memory usage by avoiding padding.
-  std::vector<AdvState> packed_inverse_state;
-  std::vector<ActionCode> packed_inverse_code;
-  std::vector<int> inverse_index;  // map of AdvStateId to where it lives in the pack
-
-  PId initial_state;
-  if (reduce_states) {
-    ix2state.resize(ps.size());
-    for (NId n = 0; n < ns.size(); n++) {
-      state2ix[ns[n].st_] = ns[n].pid_;
-      ix2state[ns[n].pid_] = ns[n].st_; // overwritten
-    }
-    num_states = ix2state.size();
-    std::unordered_map<PId, std::unordered_set<std::pair<AdvState, char>>> action_inverse_set;
-    for (const auto& s : states) {
-      for (auto kv : s.second) {
-        AdvState c;
-        char ac;
-        std::tie(c, ac) = kv;
-        PId p = ns[c2n[c.c]].pid_;
-        action_inverse_set[ns[c2n[s.first]].pid_].insert({AdvState{.c = ix2state[p]}, ac});
+    {
+      ix2state.resize(ps.size());
+      for (NId n = 0; n < ns.size(); n++) {
+        state2ix[ns[n].st_] = ns[n].pid_;
+        ix2state[ns[n].pid_] = ns[n].st_; // overwritten
       }
-    }
-    // Compute size of pack
-    int packed_size = 0;
-    for (const auto& kv : action_inverse_set) {
-      packed_size += kv.second.size();
-    }
+      // Even if the states are equivalent, the states that feed to them
+      // may not be (equivalence just says evolution in the future
+      // is the same; doesn't say anything about the past!)
+      std::unordered_map<PId, std::unordered_set<std::pair<AdvState, char>>> action_inverse_set;
+      for (const auto& s : states) {
+        for (auto kv : s.second) {
+          AdvState c;
+          char ac;
+          std::tie(c, ac) = kv;
+          // PId p = ns[c2n[c.c]].pid_;
+          PId p = state2ix[c.c];
+          action_inverse_set[state2ix[s.first]].insert({AdvState{.c = ix2state[p]}, ac});
+        }
+      }
+      // Compute size of pack
+      int packed_size = 0;
+      for (const auto& kv : action_inverse_set) {
+        packed_size += kv.second.size();
+      }
 
-    packed_inverse_state.reserve(packed_size);
-    packed_inverse_code.reserve(packed_size);
-    inverse_index.reserve(ps.size() + 1); // so we can "off by one"
+      packed_inverse_state.reserve(packed_size);
+      packed_inverse_code.reserve(packed_size);
+      inverse_index.reserve(ps.size() + 1); // so we can "off by one"
 
-    int packed_i = 0;
-    for (int p = 0; p < ps.size(); p++) {
+      int packed_i = 0;
+      for (int p = 0; p < ps.size(); p++) {
+        inverse_index.emplace_back(packed_i);
+        for (const auto& st_ac : action_inverse_set[p]) {
+          packed_inverse_state.emplace_back(st_ac.first);
+          packed_inverse_code.emplace_back(st_ac.second);
+          packed_i++;
+        }
+      }
+      assert(packed_i == packed_size);
       inverse_index.emplace_back(packed_i);
-      for (const auto& st_ac : action_inverse_set[p]) {
-        packed_inverse_state.emplace_back(st_ac.first);
-        packed_inverse_code.emplace_back(st_ac.second);
-        packed_i++;
-      }
-    }
-    assert(packed_i == packed_size);
-    inverse_index.emplace_back(packed_i);
 
-    initial_state = ns[c2n[INIT_ST.c]].pid_;
-  } else {
-    // TODO: fix me
-    ix2state.reserve(states.size());
-    for (auto s : states) {
-      PId p = ix2state.size();
-      state2ix.insert({s.first, ix2state.size()});
-      ix2state.push_back(s.first);
-      action_inverse[p] = s.second;
+      initial_state = ns[c2n[INIT_ST.c]].pid_;
     }
-    num_states = states.size();
-    initial_state = state2ix[INIT_ST.c];
   }
-
-  ps.clear();
-  ns.clear();
-
-  action_inverse.clear();
 
   // Compute necessary frame window
   int max_frames = 1;
-  for (int p = 0; p < num_states; p++) {
+  for (int p = 0; p < ix2state.size(); p++) {
     for (int j = inverse_index[p]; j < inverse_index[p+1]; j++) {
       AdvState p_st = packed_inverse_state[j];
       ActionCode ac = packed_inverse_code[j];
@@ -750,14 +752,16 @@ int main(int argc, char** argv) {
 
   std::cerr << "max frame window = " << max_frames << "\n";
 
-  int buffer_size = max_frames * num_states;
+  int buffer_size = max_frames * ix2state.size();
   std::cerr << "projected memory usage = " << (buffer_size * (sizeof(float) + sizeof(ActionString))) / (1 << 20) << " MB\n";
 
+  // A double will cost twice as much memory!  But you can do it,
+  // if you really want to: most of the memory is used by best_sequence.
   std::vector<float> best_dps(buffer_size, -1);
-  std::vector<ActionString> best_sequence(max_frames * num_states);
+  std::vector<ActionString> best_sequence(max_frames * ix2state.size());
 
   auto dix = [&](int frame, int state_ix) {
-    return (frame % max_frames) * num_states + state_ix;
+    return (frame % max_frames) * ix2state.size() + state_ix;
   };
 
   best_dps[dix(0, initial_state)] = 0;
@@ -766,38 +770,8 @@ int main(int argc, char** argv) {
   auto last_print_time = start_time;
 
   float last_best = 0;
-  // Correctness improvements
-  //   - We currently pick an arbitrary combo among all transpositions
-  //     but it would be better if we did some sort of "greedy" pick
-  //     where we preferentially kept combo sequences which were
-  //     closer to the greedy rotation  Or at the very least, pick
-  //     some deterministic combo sequence.
-  //     - Can we assign a number and use this to pick winners?
-  //       But how to keep the number up to date?
-  //     - Dumb solution: do a lexicographic compare on strings
-  //       (ew, that'll make it slower)
-
-
   // This is the bottleneck!
   //  - Snapshotting (so I can continue computing later)
-  //  - Reduce memory usage
-  //    - [DONE] Double => Float
-  //    - Compress to 16-bit integer?  Would go up to 65535 damage;
-  //      for S1/S2 only this is just slightly over.  Quantize further?
-  //      For example, use worse prints.
-  //      - Many factors in the damage calculation don't matter, except
-  //        for determining rounding; e.g.,
-  //        strength and initial 5/3.  Could apply mod, with skill
-  //        and crit modifiers.
-  //            Compare 653 dmg from c1
-  //            Without other bits: 114 * (1 + 0.18 * 0.22)
-  //        Rounding errors could be severe, however!  (Maybe can
-  //        randomize which way we round to to avoid problem?)
-  //      - This does't help too much: we spend most of our space
-  //        storing combo strings
-  //    - [DONE] Previously action strings were dynamically allocated
-  //      but now they are all allocated ahead of time, so you'll OOM
-  //      immediately when we make the table
   //  - More state reduction?
   //    - Unsound approximations; e.g., quantize buff / SP time
   //  - Branch bound (we KNOW that this is provably worse,
@@ -810,13 +784,6 @@ int main(int argc, char** argv) {
   //    - Only five actions: bucket them together
   //    - Lay out action_inverses contiguously, so we don't
   //      thrash cache
-  //  - Estimate time left
-  //  - Take advantage of sparsity
-  //    - Early on, most states are not accessible.  Only
-  //      at a certain load factor should we densify.
-  //    - Actually, in practice, we already get better performance here,
-  //      because boring states don't end up doing any FP computation.
-  //      Easily see 2x slowdown when we saturate.
   //  - Parallelize/Vectorize...
   //    - ...computation of all incoming actions (no
   //      data dependency, reduction at the end)
@@ -827,15 +794,13 @@ int main(int argc, char** argv) {
   //  - Small optimizations
   //    - Compute best as we go (in the main loop), rather
   //      than another single loop at the end
-  //
-  //  - Get some C++ library and build with it
   for (int f = 1; f < frames; f++) {
     auto cur_time = std::chrono::high_resolution_clock::now();
     if (cur_time > last_print_time + 1 * std::chrono::seconds(60)) {
       std::cerr << "fpm: " << (f * std::chrono::minutes(1)) / (cur_time - start_time) << "\n";
       last_print_time = cur_time;
     }
-    for (int s = 0; s < num_states; s++) {
+    for (int s = 0; s < ix2state.size(); s++) {
       AdvState st;
       st.c = ix2state[s];
       auto& cur = best_dps[dix(f, s)];
@@ -888,6 +853,12 @@ int main(int argc, char** argv) {
             } else if (tmp >= 0 && tmp > cur - EPSILON) {
               ActionString tmp_seq = best_sequence[z];
               tmp_seq.push(ac);
+              // The idea here is that there are often moves which
+              // have transpositions (end up with the same dps and
+              // end state); let's define an ordering on our move
+              // set and prefer moves that frontload combos to make
+              // the chosen combos deterministic.  This helps in
+              // testing.
               if (std::lexicographical_compare(
                     cur_seq.buffer_.begin(), cur_seq.buffer_.end(),
                     tmp_seq.buffer_.begin(), tmp_seq.buffer_.end())) {
@@ -902,7 +873,7 @@ int main(int argc, char** argv) {
     float best = -1;
     int best_index = -1;
     int density = 0;
-    for (int s = 0; s < num_states; s++) {
+    for (int s = 0; s < ix2state.size(); s++) {
       auto tmp = best_dps[dix(f, s)];
       if (tmp > best + EPSILON) {
         best = tmp;
