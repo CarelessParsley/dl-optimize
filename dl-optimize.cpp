@@ -38,7 +38,10 @@ constexpr bool reduce_states = true; // Whether or not to apply state space redu
 constexpr double STRENGTH = 2980.56;
 
 constexpr int SKILL_SP[3] = {2868, 5883, 4711};
-constexpr int SKILL_STARTUP = 6;
+// We follow b1ueb1ues here, and what happens is in that sim,
+// he will "nudge" the startup time so that the buff time
+// starts accurately.
+constexpr int SKILL_STARTUP[3] = {6, 6, 15};
 constexpr int SKILL_RECOVERY[3] = {111, 114, 54};
 constexpr int SKILL_MOD[3] = {1036, 933, 0};
 
@@ -56,7 +59,12 @@ constexpr int FS_RECOVERY = 34;
 constexpr int XFS_STARTUP[5] = {68, 62, 65, 67, 40};
 
 // UI gets hidden this long when you skill; you can't
-// queue another skill until you wait for the UI to come back
+// queue another skill until you wait for the UI to come back.
+// This is called "silence" in b1ueb1ues.  Note that you
+// get to charge the startup cost towards this (that's when
+// the UI button is "getting smaller")!  Silence starts
+// as soon as you trigger the input for a skill; e.g., time
+// spent waiting for startup counts towards UI recovery.
 constexpr int UI_RECOVERY = 114;
 
 // Not the combo counter, but your location in a standard C5 combo.  We
@@ -439,16 +447,15 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
     // affected by this.)
     switch (p_st.s.combo_) {
       case AFTER_S1:
-        frames += std::max(SKILL_RECOVERY[0], UI_RECOVERY);
+        frames += std::max(SKILL_STARTUP[0] + SKILL_RECOVERY[0], UI_RECOVERY);
         break;
       case AFTER_S2:
-        frames += std::max(SKILL_RECOVERY[1], UI_RECOVERY);
+        frames += std::max(SKILL_STARTUP[1] + SKILL_RECOVERY[1], UI_RECOVERY);
         break;
       case AFTER_S3:
-        frames += std::max(SKILL_RECOVERY[2], UI_RECOVERY);
+        frames += std::max(SKILL_STARTUP[2] + SKILL_RECOVERY[2], UI_RECOVERY);
         break;
     }
-    frames += SKILL_STARTUP;
   }
   return frames;
 }
