@@ -32,7 +32,6 @@ constexpr double EPSILON = 0.01;
 
 // Configuration
 constexpr int NUM_SKILLS = 3; // How many skills to consider calculation for
-constexpr bool reduce_states = true; // Whether or not to apply state space reduction with Hopcroft
 
 // Erik's stats
 constexpr double STRENGTH = 2980.56;
@@ -447,15 +446,13 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
     // affected by this.)
     switch (p_st.s.combo_) {
       case AFTER_S1:
-        frames += std::max(SKILL_RECOVERY[0], UI_RECOVERY - SKILL_STARTUP[0]);
-        break;
       case AFTER_S2:
-        frames += std::max(SKILL_RECOVERY[1], UI_RECOVERY - SKILL_STARTUP[1]);
-        break;
       case AFTER_S3:
-        frames += std::max(SKILL_RECOVERY[2], UI_RECOVERY - SKILL_STARTUP[2]);
+        int i = p_st.s.combo_ - AFTER_S1;
+        frames += std::max(SKILL_RECOVERY[i], UI_RECOVERY - SKILL_STARTUP[i]);
         break;
     }
+    frames += SKILL_STARTUP[st.s.combo_ - AFTER_S1];
   }
   return frames;
 }
