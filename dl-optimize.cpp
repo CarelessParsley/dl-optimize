@@ -447,13 +447,13 @@ int compute_frames(AdvState p_st, ActionCode ac, AdvState st) {
     // affected by this.)
     switch (p_st.s.combo_) {
       case AFTER_S1:
-        frames += std::max(SKILL_STARTUP[0] + SKILL_RECOVERY[0], UI_RECOVERY);
+        frames += std::max(SKILL_RECOVERY[0], UI_RECOVERY - SKILL_STARTUP[0]);
         break;
       case AFTER_S2:
-        frames += std::max(SKILL_STARTUP[1] + SKILL_RECOVERY[1], UI_RECOVERY);
+        frames += std::max(SKILL_RECOVERY[1], UI_RECOVERY - SKILL_STARTUP[1]);
         break;
       case AFTER_S3:
-        frames += std::max(SKILL_STARTUP[2] + SKILL_RECOVERY[2], UI_RECOVERY);
+        frames += std::max(SKILL_RECOVERY[2], UI_RECOVERY - SKILL_STARTUP[2]);
         break;
     }
   }
