@@ -856,6 +856,7 @@ int main(int argc, char** argv) {
       std::cerr << "fpm: " << (f * std::chrono::minutes(1)) / (cur_time - start_time) << "\n";
       last_print_time = cur_time;
     }
+    #pragma omp parallel for
     for (int s = 0; s < ix2state.size(); s++) {
       AdvState st;
       st.c = ix2state[s];
