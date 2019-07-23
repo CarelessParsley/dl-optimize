@@ -8,6 +8,26 @@
 #include <cassert>
 #include <chrono>
 
+// Planned design for configurable input
+//
+// - Don't implement a fancy parser in C++.  Reuse b1ueb1ues data from
+// Python, feed it into the program via some easy to parse C++ format
+// (probably something std::cin friendly)
+//
+// - Obvious parameters need configuring.  Less obvious ones:
+//  - Nudged skill startup, to make buff timing correct
+//  - Extra per-weapon actions (FSF, held blade C5, dodge, dodge FS)
+//    Fortunately, these are often exclusive to weaps, so we can
+//    "reuse" state space in some cases.  All of these need frame
+//    data and also extend ActionCode and ActionString.  Packing
+//    in ActionString can be problematic.
+//  - Extra combo state for UI lag.  If there is a skill with low
+//    recovery, need to handle silence as extra state.
+//  - Stuffing AdvState struct with stuff.  Not the worst thing in
+//    the world if this takes two words though (state space after
+//    reduction matters more) but would prefer not to waste "space"
+//    in the struct for things you don't use.
+
 namespace std {
   template<typename T>
   inline void hash_combine(std::size_t& seed, const T& val) {
